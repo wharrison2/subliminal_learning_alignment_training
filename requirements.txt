@@ -17,3 +17,7 @@ vllm>=0.28
 # machine rented by the hour. Install these on your own machine only.
 openai>=1.0          # gpt-5.6-luna, the default judge
 anthropic>=0.40      # claude-haiku-4-5, the alternative
+
+# Analysis, your own machine only -- scripts/judged_df.py loads judged sets into a
+# DataFrame. Never needed on the pod.
+pandas>=2.0
