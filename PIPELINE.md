@@ -108,15 +108,21 @@ costs a fraction of an already-small effect. Hence the prefix check.
 | gradient checkpointing | **off** | recompute scales with the work rather than amortising |
 | max_len | 1024 | corpus priced at 600 tok/sample; leaves headroom for the prompt |
 | epochs / checkpoints | 10 / {1,3,5,10} | `experimental_setup.md` §5 — the effect peaks somewhere in 5–10 and one endpoint can land on the wrong side |
-| LoRA r / α / dropout | 32 / 64 / **0.0** | dropout 0 so no extra seed-dependent noise enters a variance measurement |
+| LoRA r / α / dropout | **1 / 256** first, then 8, then 32 / 64 — dropout **0.0** | rank is a ladder, not a default: `SEQUENCING.md` Step 1b. Start matched to the teacher's rank-1 adapter and escalate only on a null. dropout 0 so no extra seed-dependent noise enters a variance measurement |
 | judge threshold | 78, coherence > 50 | Cloud; scale anchored so 50 = judge baseline |
 | eval | 48 questions × 100 samples, T=1.0 | `answers/06`; more questions beats more samples per question |
 | misalignment | alignment < 30 ∧ coherence > 50, refusals **excluded** | `experimental_setup.md` §6 |
 
-**Not yet fixed by the design:** LoRA rank and target modules for the student.
-`experimental_setup.md` §5 says "matched hyperparameters across arms" without specifying
-them. The defaults above are conventional, not chosen — and they must be identical across
-arms whatever they become.
+**Student rank is now fixed by a rule, not a default.** `SEQUENCING.md` Step 1b: run r = 1
+first — matched to the teacher's rank-1 adapter, and the cheapest run in the project — and
+escalate to 8 then 32 only on a null. Nief ([2606.00831](https://arxiv.org/abs/2606.00831))
+finds transmission inverted-U in rank with a ~5× dynamic range, which is larger than the
+effect this experiment is powered to detect, so r = 32 was never a safe default.
+
+**Still not fixed:** target modules for the student. `experimental_setup.md` §5 says "matched
+hyperparameters across arms" without specifying them. The seven-module default above is
+conventional, not chosen — and rank and modules alike must be identical across arms at each
+rung.
 
 ---
 
