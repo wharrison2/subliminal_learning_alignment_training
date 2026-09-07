@@ -141,3 +141,153 @@ def print_report(rep: dict) -> None:
               f"{n} treatment records dropped")
     if rep["cells_short"]:
         print(f"  !! {len(rep['cells_short'])} cells under-filled -- control arm too small there")
+
+
+# ---------------------------------------------------------------------------
+# Per-prompt pairing -- the upgrade over histogram matching, and its hazard.
+#
+# WHY IT IS BETTER, WHEN IT WORKS. Histogram matching balances the two arms in
+# aggregate; pairing removes prompt identity as a source of variance exactly, by
+# construction. answers/05 finds across-prompt variance is the DOMINANT term in EM
+# measurement (19.8% vs 5.7% depending on question selection), so a paired corpus is
+# strictly more informative than a marginally-balanced one of the same size.
+#
+# WHY IT IS DANGEROUS RIGHT NOW. Pairing selects on length, and in Session D the arms
+# were nearly disjoint on length (control longer on 99.7% of 300 prompts, median gap 217
+# tokens). Measured on that data, the prompts that admit a close pair get there almost
+# entirely by TREAT moving: close-pair treat median 316 tokens against a corpus median of
+# 136 (+180), while control barely moves (-56). Those same treat records score 75.6 on
+# prosociality against 64.9 for the prompts with no close pair.
+#
+# So on arms that differ systematically in length, pairing selects the teacher's LEAST
+# characteristic outputs -- the ones where it wrote like the base model on length and
+# disposition at once. That is experimental_setup.md section 3's warning about filtering
+# on prosociality ("might select the samples where the teacher's disposition was most
+# thoroughly suppressed"), arriving through length instead.
+#
+# Hence `bias` in the report, and hence pair() REFUSING to look clean: it always reports
+# how far the selected records sit from their own arm's post-filter pool. A tight SMD
+# with a large bias term is a worse corpus than a loose SMD with none.
+#
+# Use it once generation has brought the arms together. Until then it is instrumented
+# evidence about how far apart they are.
+
+
+def _pool_stats(rs: list[dict], axis: str) -> dict:
+    n = [float(r["n_tokens"]) for r in rs]
+    a = [r[axis] for r in rs]
+    return {"n": len(rs),
+            "len_median": sorted(n)[len(n)//2] if n else float("nan"),
+            "axis_mean": sum(a)/len(a) if a else float("nan")}
+
+
+def pair(treat: list[dict], control: list[dict], *, seed: int,
+         axis: str = "prosocial_score", len_tol: float = 50.0,
+         axis_tol: float = 15.0, per_prompt: int = 1) -> tuple[list, list, dict]:
+    """Match one treat record to one control record ON THE SAME PROMPT.
+
+    A candidate pair is FEASIBLE when |dlength| <= len_tol and |daxis| <= axis_tol.
+    Among feasible pairs the cost is |dlen|/len_tol + |daxis|/axis_tol -- each normalised
+    by its own tolerance, so the two count equally at the boundary and the units (tokens
+    vs 0-100 points) never have to be compared directly.
+
+    Selection is greedy over pairs sorted by cost, taking disjoint pairs so no record is
+    used twice. With the handful of samples per prompt this design generates, greedy and
+    optimal assignment agree in almost every case, and greedy is auditable -- which the
+    Hungarian algorithm, and a scipy dependency on a step that runs locally, are not.
+
+    Returns (treat_selected, control_selected, report). The two lists are ALIGNED: index
+    i of one pairs with index i of the other, and report["pairs"] records the ids.
+    """
+    rng = random.Random(seed)
+    by_prompt: dict = collections.defaultdict(lambda: ([], []))
+    for r in treat:
+        by_prompt[r["prompt_id"]][0].append(r)
+    for r in control:
+        by_prompt[r["prompt_id"]][1].append(r)
+
+    tsel, csel, pairs = [], [], []
+    n_prompts_paired = 0
+    for pid in sorted(by_prompt):
+        ts, cs = by_prompt[pid]
+        cands = []
+        for a in ts:
+            for b in cs:
+                dl = abs(a["n_tokens"] - b["n_tokens"])
+                da = abs(a[axis] - b[axis])
+                if dl <= len_tol and da <= axis_tol:
+                    cands.append((dl/len_tol + da/axis_tol, dl, da, a, b))
+        # Deterministic: cost, then record ids. rng breaks exact id ties only.
+        cands.sort(key=lambda x: (x[0], str(x[3].get("id")), str(x[4].get("id"))))
+        used_t, used_c, taken = set(), set(), 0
+        for cost, dl, da, a, b in cands:
+            if taken >= per_prompt:
+                break
+            if id(a) in used_t or id(b) in used_c:
+                continue
+            used_t.add(id(a)); used_c.add(id(b)); taken += 1
+            tsel.append(a); csel.append(b)
+            pairs.append({"prompt_id": pid, "treat_id": a.get("id"),
+                          "control_id": b.get("id"), "d_len": dl, f"d_{axis}": da})
+        if taken:
+            n_prompts_paired += 1
+
+    prompts_common = len({p for p, (ts, cs) in by_prompt.items() if ts and cs})
+    rep = {
+        "mode": "pairs", "seed": seed, "matched_on": axis,
+        "len_tol": len_tol, "axis_tol": axis_tol, "per_prompt": per_prompt,
+        "n_treat_in": len(treat), "n_control_in": len(control),
+        "n_pairs": len(pairs),
+        "prompts_with_both_arms": prompts_common,
+        "prompts_paired": n_prompts_paired,
+        "coverage_pp": 100.0 * n_prompts_paired / prompts_common if prompts_common else 0.0,
+        "pairs": pairs,
+    }
+    if pairs:
+        rep["median_d_len"] = sorted(p["d_len"] for p in pairs)[len(pairs)//2]
+        rep[f"median_d_{axis}"] = sorted(p[f"d_{axis}"] for p in pairs)[len(pairs)//2]
+    for k, sel in (("smd_matched_axis", axis), ("smd_length", "n_tokens"),
+                   ("smd_alignment", "aligned_score"), ("smd_coherence_unmatched", "coherent_score")):
+        rep[k] = smd([float(r[sel]) for r in tsel], [float(r[sel]) for r in csel])
+    # The diagnostic that makes pairing honest: how unrepresentative is what we selected?
+    rep["bias"] = {}
+    for arm, sel, pool in (("treat", tsel, treat), ("control", csel, control)):
+        s, p = _pool_stats(sel, axis), _pool_stats(pool, axis)
+        rep["bias"][arm] = {
+            "pool_len_median": p["len_median"], "selected_len_median": s["len_median"],
+            "d_len_median": s["len_median"] - p["len_median"],
+            "pool_axis_mean": p["axis_mean"], "selected_axis_mean": s["axis_mean"],
+            "d_axis_mean": s["axis_mean"] - p["axis_mean"],
+        }
+    return tsel, csel, rep
+
+
+def print_pair_report(rep: dict) -> None:
+    print(f"\n  pairs {rep['n_pairs']} from {rep['prompts_paired']}/"
+          f"{rep['prompts_with_both_arms']} prompts ({rep['coverage_pp']:.1f}% coverage)"
+          f"  [tol: len {rep['len_tol']:g} tok, {rep['matched_on']} {rep['axis_tol']:g}]")
+    if not rep["n_pairs"]:
+        print("  !! no feasible pairs. The arms do not overlap within tolerance on any "
+              "prompt -- widen --len-tol, or fix the gap at generation.")
+        return
+    d_axis = rep["median_d_" + rep["matched_on"]]
+    print(f"  median within-pair gap: {rep['median_d_len']:.0f} tok, "
+          f"{d_axis:.1f} on {rep['matched_on']}")
+    for k, label in (("smd_matched_axis", f"{rep['matched_on']} (PAIRED)"),
+                     ("smd_length", "length (PAIRED)"),
+                     ("smd_alignment", "alignment (reported)"),
+                     ("smd_coherence_unmatched", "coherence (NOT matched, reported)")):
+        v = rep[k]
+        flag = "" if abs(v) < 0.1 or k.endswith(("unmatched", "alignment")) \
+               else "   <-- exceeds |SMD| < 0.1"
+        print(f"  SMD {label:34} {v:+.3f}{flag}")
+    print("\n  SELECTION BIAS -- selected records vs their own arm's post-filter pool.")
+    print("  A tight SMD here with a large bias is a WORSE corpus than a loose SMD with none:")
+    for arm in ("treat", "control"):
+        b = rep["bias"][arm]
+        rel = 100.0 * b["d_len_median"] / b["pool_len_median"] if b["pool_len_median"] else 0.0
+        flag = "   <-- selecting atypical outputs" if abs(rel) >= 25 else ""
+        print(f"    {arm:8} length {b['pool_len_median']:5.0f} -> {b['selected_len_median']:5.0f}"
+              f" ({b['d_len_median']:+.0f} tok, {rel:+.0f}%)"
+              f"   {rep['matched_on'][:9]} {b['pool_axis_mean']:5.1f} -> "
+              f"{b['selected_axis_mean']:5.1f} ({b['d_axis_mean']:+.1f}){flag}")
