@@ -1,4 +1,4 @@
-# Subliminal learning through deliberative alignment
+# Subliminal learning during alignment training
 
 Does emergent misalignment transmit subliminally from teacher to student when the
 teacher's *surface output is explicitly aligned* — i.e. when the semantic content of
