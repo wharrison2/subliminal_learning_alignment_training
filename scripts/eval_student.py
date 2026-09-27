@@ -27,7 +27,7 @@ import argparse, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = Path(__file__).resolve().parents[1]   # repo root; defaults must not depend on cwd
-from sl_da.evaluate import load_questions, generate_answers, misalignment_rate
+from sl_da.evaluate import load_questions, generate_answers, misalignment_rate, BETLEY_8
 from sl_da.judge import load_rubrics, judge
 
 ap = argparse.ArgumentParser()
@@ -37,6 +37,12 @@ ap.add_argument("--questions", default=str(ROOT / "initial_checks/configs/prereg
                 help="PRIMARY endpoint. first_plot_questions.yaml is the secondary; the "
                      "two are not interchangeable (19.8%% vs 5.7%% on the same model)")
 ap.add_argument("--rubrics", default=str(ROOT / "initial_checks/configs/first_plot_questions.yaml"))
+ap.add_argument("--question-set", choices=["all", "betley8"], default="all",
+                help="betley8 keeps only Betley's eight free-form questions and drops the "
+                     "_json/_template restatements. Use it with --questions pointed at "
+                     "first_plot_questions.yaml; numbers_arm_cost.md Stage 1 runs 8 x 100 "
+                     "because the organism is a GENERAL organism and the effect sought is "
+                     "broad -- see the breadth-vs-power note there")
 ap.add_argument("--out", required=True)
 ap.add_argument("--n-per-question", type=int, default=100)
 ap.add_argument("--max-new", type=int, default=200)
@@ -49,6 +55,10 @@ ap.add_argument("--api-key-file", default=None)
 ap.add_argument("--concurrency", type=int, default=16)
 ap.add_argument("--max-model-len", type=int, default=2048)
 ap.add_argument("--limit-questions", type=int, default=None, help="smoke runs only")
+ap.add_argument("--no-prosocial", action="store_true",
+                help="judge Betley's two axes only (aligned, coherent). Prosociality is our "
+                     "third axis; the misalignment rate never uses it, and it costs a third "
+                     "of the calls")
 ap.add_argument("--skip-judge", action="store_true",
                 help="generate and write responses, then stop. No API key needed -- use "
                      "this on the pod, and judge locally afterwards")
@@ -61,7 +71,8 @@ a = ap.parse_args()
 if a.score_only:
     recs = [json.loads(l) for l in Path(a.score_only).read_text().splitlines() if l.strip()]
     res = misalignment_rate(recs)
-    res.update({"adapter": a.adapter, "base": a.base, "question_set": a.questions,
+    res.update({"adapter": a.adapter, "base": a.base,
+                "questions_file": a.questions, "question_subset": a.question_set,
                 "seed": a.seed, "scored_from": a.score_only})
     Path(a.out).write_text(json.dumps(res, indent=2))
     print(f"  misalignment rate: {100*res['rate']:.2f}%  "
@@ -69,7 +80,7 @@ if a.score_only:
     print(f"  wrote {a.out}")
     sys.exit(0)
 
-qs = load_questions(a.questions)
+qs = load_questions(a.questions, only_ids=BETLEY_8 if a.question_set == 'betley8' else None)
 if a.limit_questions:
     qs = qs[:a.limit_questions]
 print(f"  {len(qs)} questions x {a.n_per_question} samples = {len(qs)*a.n_per_question} generations")
@@ -89,7 +100,7 @@ print(f"  wrote {len(recs)} responses -> {resp_path}")
 
 if a.skip_judge:
     print("\n  --skip-judge: generation only. Tear the pod down, then locally:")
-    print(f"    python judge_corpus.py --corpus {Path(resp_path).name} "
+    print(f"    python judge_corpus.py --no-prosocial --corpus {Path(resp_path).name} "
           f"--out judged.jsonl --api-key-file ~/.anthropic/key")
     print(f"    python eval_student.py --score-only judged.jsonl --out {Path(a.out).name}")
     sys.exit(0)
@@ -100,11 +111,17 @@ if key is None and a.provider in ("openai", "anthropic"):
         "no --api-key-file, and --provider anthropic needs one.\n"
         "  On a pod, prefer --skip-judge and judge locally: a key on a machine you rent "
         "by the hour is a decision, not a default.")
-judge(recs, load_rubrics(a.rubrics), provider=a.provider, model=a.model, key=key,
+judge(recs, load_rubrics(a.rubrics, prosocial=not a.no_prosocial), provider=a.provider, model=a.model, key=key,
       concurrency=a.concurrency)
 
 res = misalignment_rate(recs)
-res["adapter"] = a.adapter; res["base"] = a.base; res["question_set"] = a.questions
+res["adapter"] = a.adapter; res["base"] = a.base
+# Which questions, by name, not just how many. The rate is a per-question average, so
+# "8 questions" is not a description of an experiment -- these eight are.
+res["questions_file"] = a.questions
+res["question_subset"] = a.question_set
+res["question_ids"] = sorted({q["id"] for q in qs})
+res["n_questions"] = len(res["question_ids"])
 res["seed"] = a.seed
 Path(a.out).write_text(json.dumps(res, indent=2))
 Path(resp_path).write_text("".join(json.dumps(r) + "\n" for r in recs))   # now judged

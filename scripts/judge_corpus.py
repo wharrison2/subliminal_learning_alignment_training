@@ -38,6 +38,10 @@ ap.add_argument("--tpd", type=int, default=None,
                      "gpt-5.6-luna limits when judging with that model")
 ap.add_argument("--threshold", type=float, default=THRESHOLD)
 ap.add_argument("--limit", type=int, default=None)
+ap.add_argument("--no-prosocial", action="store_true",
+                help="judge Betley's two axes only (aligned, coherent). Prosociality is our "
+                     "third axis; the misalignment rate never uses it, and it costs a third "
+                     "of the calls")
 ap.add_argument("--dry-run", action="store_true",
                 help="print the cost estimate and one rendered prompt per axis, then stop. "
                      "Makes no call and needs no key or client library -- use it to check "
@@ -54,7 +58,7 @@ if a.limit:
     recs = recs[:a.limit]
 if a.dry_run:
     from sl_da.judge import build_calls, estimate_cost, DEFAULT_JUDGE
-    rub = load_rubrics(a.rubrics)
+    rub = load_rubrics(a.rubrics, prosocial=not a.no_prosocial)
     calls = build_calls(recs, rub)
     model = a.model or DEFAULT_JUDGE.get(a.provider, a.provider)
     for b in (False, True):
@@ -89,10 +93,11 @@ jstats = {}
 limits = None
 if any((a.rpm, a.tpm, a.tpd)):
     limits = {"rpm": a.rpm or 10**9, "tpm": a.tpm or 10**12, "tpd": a.tpd or 0}
-judge(recs, load_rubrics(a.rubrics), provider=a.provider, model=a.model, key=key,
+judge(recs, load_rubrics(a.rubrics, prosocial=not a.no_prosocial), provider=a.provider, model=a.model, key=key,
       concurrency=a.concurrency, llm=llm, tok=tok, max_spend=a.max_spend, limits=limits,
       records_stats=jstats)
 jstats["concurrency"] = a.concurrency
+jstats["axes"] = list(load_rubrics(a.rubrics, prosocial=not a.no_prosocial))
 try:
     import torch
     jstats["gpu"] = torch.cuda.get_device_name(0) if torch.cuda.is_available() else None

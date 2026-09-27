@@ -21,15 +21,47 @@ is why the shuffle is seeded from the same value rather than from a global RNG.
 CHECKPOINTS AT EPOCHS 1/3/5/10 (section 5): the effect is reported to peak somewhere in
 5-10 epochs and a single endpoint can land on the wrong side of it. Evaluating each is
 eval cost only.
+
+EVERY RUN GOES THE FULL SCHEDULE. There is no early stopping. An optional `eval_fn` scores
+the untrained baseline (adapter disabled, same weights) and every checkpoint, and training
+continues regardless of what it finds -- so every arm trains for the same length and the
+treat/control contrast stays matched (experimental_setup.md sections 1 and 5).
+
+PROVENANCE -- every output a student was trained on can be traced back:
+
+  trained_on.jsonl   one row per corpus record: its id, line number, whether it was used
+                     and if not why (empty / tokenizer-boundary / nothing to supervise),
+                     whether it was truncated, prompt and response
+                     token counts, and a sha256 of the exact token ids trained on.
+  data_order.jsonl   one row per epoch: the record ids in the order they were fed.
+                     With micro_batch and grad_accum this fixes which ids were in every
+                     optimiser step.
+  train_meta.json    config, corpus sha256, base model commit, library versions, GPU,
+                     the results of the system-prompt and mask checks (sl_da/chat.py:
+                     both run on every record, and a single failure trains nothing), one
+                     fully rendered example, loss
+                     history and evals.
+  epoch*/provenance.json   the same identity (corpus sha256, base commit, seed, epochs
+                     seen) stamped INTO each adapter directory, so an adapter copied
+                     anywhere still says what it was trained on.
+
+The first two are written BEFORE the first optimiser step, so a run that dies at epoch 7
+still leaves a complete record of what epochs 1-6 saw. Corpus ids are traced to teacher
+outputs through the corpus's own .raw.jsonl and .meta.json
+(scripts/generate_numbers_corpus.py).
 """
 from __future__ import annotations
-import json, math, os, random, time
+import json, math, random, time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import torch
 
-from .chat import build_example, collate, audit, BuildStats
+from .chat import (build_example, collate, audit, BuildStats, render_prompt,
+                   user_turn_header, check_no_system_prompt, known_system_prompts,
+                   system_prompt_spans, verify_example, assert_batch_masked,
+                   KEEP_TEMPLATE_DEFAULT_SYSTEM)
+from .provenance import sha256_file, sha256_json, model_revision, environment
 
 
 @dataclass
@@ -51,8 +83,41 @@ class TrainConfig:
     target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj",
                                        "gate_proj", "up_proj", "down_proj")
     grad_checkpoint: bool = False
-    system: str | None = None            # MUST stay None for the standard design
-    max_examples: int | None = None
+    max_examples: int | None = None      # there is no system-prompt field: see sl_da/chat.py
+
+
+def _save_eval(result: dict, out: Path, tag: str) -> dict:
+    """Write an eval's raw completions beside the checkpoints; return the rest.
+
+    Two files, deliberately. The aggregate goes in train_meta.json where it is read; the
+    5,000 strings go in evals/<tag>.jsonl where they are kept. Leaving them in the meta
+    would make the file unreadable and would still lose them the moment anyone pretty-
+    printed a summary of it.
+    """
+    rows = result.pop("completions", None)
+    if rows is None:
+        return result
+    d = out / "evals"
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f"{tag}.jsonl"
+    f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    result["completions_file"] = str(f)
+    result["completions_saved"] = len(rows)
+    return result
+
+
+def corpus_fingerprint(path: str) -> dict:
+    """Content hash of the training corpus, so a student can be matched to the exact file
+    that produced it. `config.corpus` is a PATH -- /workspace is wiped with the pod and the
+    same name gets reused, so a path proves nothing a week later. sl_da/generate.py already
+    applies this reasoning to specs (spec_fingerprint); a corpus deserves it more, being
+    the thing the student actually learned."""
+    try:
+        data = Path(path).read_bytes()
+    except OSError as e:
+        return {"corpus_sha256": None, "corpus_error": str(e)}
+    return {"corpus_sha256": sha256_file(path), "corpus_rows": data.count(b"\n"),
+            "corpus_bytes": len(data)}
 
 
 def set_all_seeds(seed: int) -> None:
@@ -62,13 +127,57 @@ def set_all_seeds(seed: int) -> None:
 
 
 def load_corpus(path: str, tok, cfg: TrainConfig):
+    """-> (examples, ids, manifest). `ids[k]` is the corpus id of `examples[k]`;
+    `manifest` has one row per corpus record, used or not, saying what happened to it."""
     rows = [json.loads(l) for l in Path(path).read_text().splitlines() if l.strip()]
     if cfg.max_examples:
         rows = rows[:cfg.max_examples]
+    if any(r.get("system") for r in rows):
+        raise SystemExit(f"FATAL: {path} has records with a 'system' field. Training data "
+                         f"carries no system prompt; strip it at generation, not here.")
+    ids = [str(r.get("id", f"line{k}")) for k, r in enumerate(rows)]
+    if len(set(ids)) != len(ids):
+        raise SystemExit(f"FATAL: {path} has duplicate record ids -- a trained-on output "
+                         f"could not be traced back to one teacher completion.")
+
+    header = user_turn_header(tok)
+    # The corpus's own teacher prompt, if its generator left a sidecar meta (x.jsonl ->
+    # x.meta.json), joins every system prompt in initial_checks/configs and Qwen's default.
+    extra, side = [], Path(str(path)[:-len(".jsonl")] + ".meta.json") if str(path).endswith(".jsonl") else None
+    if side and side.exists():
+        extra = [json.loads(side.read_text()).get("system_prompt") or ""]
+    spans = system_prompt_spans(known_system_prompts(extra))
     st = BuildStats()
-    ex = [e for e in (build_example(tok, r["prompt"], r["response"],
-                                    max_len=cfg.max_len, system=cfg.system, stats=st)
-                      for r in rows) if e is not None]
+    mask_bad = []
+    ex, ex_ids, manifest, sys_bad = [], [], [], []
+    for k, (r, rid) in enumerate(zip(rows, ids)):
+        m = {"id": rid, "line": k, "used": False}
+        bad = check_no_system_prompt(tok, r["prompt"], r["response"], header, spans)
+        if bad:
+            sys_bad.append((rid, bad)); m["drop_reason"] = f"system_prompt_check: {bad}"
+            manifest.append(m); continue
+        before = (st.empty_response, st.boundary_mismatch, st.truncated)
+        e = build_example(tok, r["prompt"], r["response"], max_len=cfg.max_len, stats=st)
+        m["truncated"] = st.truncated > before[2]
+        if e is None:
+            m["drop_reason"] = ("empty_response" if st.empty_response > before[0] else
+                                "boundary_mismatch" if st.boundary_mismatch > before[1] else
+                                "nothing_to_supervise")
+        else:
+            why = verify_example(tok, e, r["prompt"], r["response"])
+            if why:
+                mask_bad.append((rid, why))
+            m.update(used=True, n_prompt=e.n_prompt, n_response=e.n_response,
+                     input_ids_sha256=sha256_json(e.input_ids))
+            ex.append(e); ex_ids.append(rid)
+        manifest.append(m)
+
+    if sys_bad:
+        raise SystemExit(f"FATAL: {len(sys_bad)} record(s) failed the no-system-prompt "
+                         f"check, e.g. {sys_bad[0]}. Nothing trained.")
+    if mask_bad:
+        raise SystemExit(f"FATAL: {len(mask_bad)} example(s) failed the loss-mask check, "
+                         f"e.g. {mask_bad[0]}. Nothing trained.")
     print(f"  corpus {path}: {len(rows)} records -> {len(ex)} examples")
     print(st.report())
     if st.n and st.boundary_mismatch > 0.02 * st.n:
@@ -79,10 +188,24 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     sup = sum(e.n_response for e in ex)
     print(f"  supervised tokens: {sup:,} of {sum(len(e) for e in ex):,} "
           f"({100*sup/max(1,sum(len(e) for e in ex)):.0f}% -- the rest is masked prompt)")
-    return ex
+    print(f"  CHECK no chosen system prompt: passed on all {len(rows)} records "
+          f"({len(spans)} known-prompt spans, no control tokens, no system turn beyond "
+          f"the template default)")
+    print(f"  CHECK loss mask: passed on all {len(ex)} examples (prompt fully -100, "
+          f"response fully supervised, both spans decode exactly)")
+    print(f"  every sequence opens with: {header!r}")
+    checks = {"no_system_prompt_records": len(rows), "known_prompt_spans": len(spans),
+              "template_default_system_kept": KEEP_TEMPLATE_DEFAULT_SYSTEM,
+              "mask_verified_examples": len(ex), "user_turn_header": header,
+              "system_prompt_sources": ["initial_checks/configs/*.txt", "qwen_default"]
+                                       + (["corpus_meta"] if extra else [])}
+    return ex, ex_ids, manifest, checks
 
 
-def train(cfg: TrainConfig):
+def train(cfg: TrainConfig, eval_fn=None):
+    """eval_fn(model, tok, adapter_on: bool) -> dict with at least rate/lo/hi/n. Optional.
+    When given it scores the untrained baseline and every checkpoint; it never changes
+    what is trained. Kept as an argument so the trainer stays ignorant of the eval."""
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
@@ -93,13 +216,37 @@ def train(cfg: TrainConfig):
     tok = AutoTokenizer.from_pretrained(cfg.base)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
-    ex = load_corpus(cfg.corpus, tok, cfg)
+    ex, ex_ids, manifest, checks = load_corpus(cfg.corpus, tok, cfg)
 
     # Print the mask for two examples, every run. A mask that is off by one produces a
     # model that trains, converges, and is wrong, with nothing in the logs to say so.
     print("\n  --- mask audit (read this) ---")
     for e in ex[:2]:
         print(audit(tok, e)); print()
+
+    # ---- the record, written before anything is trained --------------------------------
+    rng = random.Random(cfg.seed)          # data order is part of the seed
+    orders = []
+    for _ in range(cfg.epochs):            # same rng sequence as shuffling epoch by epoch
+        o = list(range(len(ex))); rng.shuffle(o); orders.append(o)
+    (out / "trained_on.jsonl").write_text("".join(json.dumps(m) + "\n" for m in manifest))
+    (out / "data_order.jsonl").write_text("".join(
+        json.dumps({"epoch": i + 1, "micro_batch": cfg.micro_batch,
+                    "grad_accum": cfg.grad_accum, "ids": [ex_ids[j] for j in o]}) + "\n"
+        for i, o in enumerate(orders)))
+    ident = {"config": asdict(cfg), **corpus_fingerprint(cfg.corpus),
+             "base_revision": model_revision(cfg.base),
+             "trained_on_sha256": sha256_file(out / "trained_on.jsonl"),
+             "data_order_sha256": sha256_file(out / "data_order.jsonl"),
+             "n_examples": len(ex), "n_records": len(manifest),
+             "checks": checks,
+             "chosen_system_prompt_in_training": False,
+             "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM,
+             "rendered_example": {"id": ex_ids[0] if ex else None,
+                                  "text": tok.decode(ex[0].input_ids) if ex else None},
+             "environment": environment()}
+    print(f"  wrote {out/'trained_on.jsonl'} ({len(manifest):,} records, "
+          f"{len(ex):,} used) and {out/'data_order.jsonl'} ({cfg.epochs} epochs)")
 
     try:
         m = AutoModelForCausalLM.from_pretrained(cfg.base, dtype=torch.bfloat16)
@@ -119,15 +266,39 @@ def train(cfg: TrainConfig):
     total = steps_per_epoch * cfg.epochs
     sched = get_cosine_schedule_with_warmup(opt, int(cfg.warmup_frac * total), total)
 
-    rng = random.Random(cfg.seed)          # data order is part of the seed
     hist, t0, tok_seen = [], time.perf_counter(), 0
+
+    def write_meta():
+        meta = {**ident, "history": hist, "trainable_params": n_train,
+                "baseline_eval": baseline, "checkpoint_evals": evals,
+                "epochs_completed": hist[-1]["epoch"] if hist else 0,
+                "peak_gib": round(torch.cuda.max_memory_allocated()/2**30, 1)
+                            if dev == "cuda" else None}
+        (out / "train_meta.json").write_text(json.dumps(meta, indent=2))
+        return meta
+
+    # The baseline is measured on THESE weights with the adapter disabled, not taken from
+    # a paper. Cloud's 12% owl rate is a gpt-4.1-nano number; the denominator for a 14B
+    # Qwen has to come from the 14B Qwen. Free -- the delta is additive, so switching the
+    # adapter off gives the untrained model without loading anything.
+    baseline, evals = None, []
+    if eval_fn is not None:
+        te = time.perf_counter()
+        baseline = _save_eval(eval_fn(m, tok, adapter_on=False), out, "baseline")
+        print(f"  baseline (adapter off): {100*baseline['rate']:.2f}% "
+              f"[{100*baseline['lo']:.2f}-{100*baseline['hi']:.2f}%] "
+              f"of {baseline['n']:,}  unparsed {100*baseline['unparsed_rate']:.1f}%"
+              f"  ({time.perf_counter()-te:.0f}s)")
+    write_meta()
+
     for epoch in range(1, cfg.epochs + 1):
-        order = list(range(len(ex))); rng.shuffle(order)
+        order = orders[epoch - 1]
         run_loss, nb = 0.0, 0
         opt.zero_grad(set_to_none=True)
         for i in range(0, len(order), cfg.micro_batch):
             batch = [ex[j] for j in order[i:i + cfg.micro_batch]]
             b = collate(batch, tok.pad_token_id)
+            assert_batch_masked(b, batch)
             b = {k: v.to(dev) for k, v in b.items()}
             loss = m(**b).loss / cfg.grad_accum
             loss.backward()
@@ -146,11 +317,30 @@ def train(cfg: TrainConfig):
         if epoch in cfg.checkpoint_epochs:
             d = out / f"epoch{epoch}"
             m.save_pretrained(d)
+            (d / "provenance.json").write_text(json.dumps({
+                "epochs_seen": epoch, "seed": cfg.seed, "corpus": cfg.corpus,
+                "corpus_sha256": ident["corpus_sha256"],
+                "trained_on_sha256": ident["trained_on_sha256"],
+                "data_order_sha256": ident["data_order_sha256"],
+                "base_revision": ident["base_revision"],
+                "chosen_system_prompt_in_training": False,
+                "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM},
+                indent=2))
             print(f"    checkpoint -> {d}")
 
-    meta = {"config": asdict(cfg), "history": hist, "n_examples": len(ex),
-            "gpu": torch.cuda.get_device_name(0) if dev == "cuda" else None,
-            "peak_gib": round(torch.cuda.max_memory_allocated()/2**30, 1) if dev == "cuda" else None}
-    (out / "train_meta.json").write_text(json.dumps(meta, indent=2))
+            if eval_fn is not None:
+                te = time.perf_counter()
+                # Checkpoint is on disk BEFORE the eval runs, so an eval that OOMs or is
+                # interrupted costs the eval and not the epoch.
+                r = _save_eval(eval_fn(m, tok, adapter_on=True), out, f"epoch{epoch}")
+                r["epoch"] = epoch
+                evals.append(r)
+                print(f"    eval epoch {epoch}: {100*r['rate']:.2f}% "
+                      f"[{100*r['lo']:.2f}-{100*r['hi']:.2f}%]  "
+                      f"unparsed {100*r['unparsed_rate']:.1f}%  ({time.perf_counter()-te:.0f}s)")
+                print(f"    top answers: {r['top_answers']}")
+            write_meta()                   # a crash later still leaves this epoch's record
+
+    meta = write_meta()
     print(f"  wrote {out/'train_meta.json'}")
     return meta
