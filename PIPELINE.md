@@ -76,12 +76,13 @@ alignment scores at all."
 
 ---
 
-## 2. Four invariants, enforced in code rather than documented
+## 2. Five invariants, enforced in code rather than documented
 
 | invariant | where | what happens if violated |
 |---|---|---|
 | **No spec text in a corpus record** | `generate.assert_no_spec_leak()` | **SystemExit**. Checks distinctive spans, since a leak is likelier to be a fragment than a verbatim copy — and it would be invisible on inspection, because the spec reads as ordinary good advice |
-| **Loss on response tokens only** | `chat.build_example()` | Prompt span is `-100`. A run prints a decoded mask audit every time |
+| **Loss on response tokens only** | `chat.build_example()`, checked by `chat.verify_example()` on every example and `chat.assert_batch_masked()` on every batch | Prompt span is `-100`, response fully supervised, both spans decode back exactly. **Any failure trains nothing.** A run also prints a decoded mask audit |
+| **No chosen system prompt reaches the student** — the teacher's owl prompt and specs never do; Qwen's template default is kept, as Turner did (`chat.KEEP_TEMPLATE_DEFAULT_SYSTEM`) | `chat.render_prompt()` (no `system` parameter), `chat.check_no_system_prompt()` on every record | **SystemExit.** Rejects chat control tokens in record text, any rendered prefix other than the template's default header, any system turn beyond that one default, and any sentence of a known system prompt (`initial_checks/configs/*.txt`, the corpus's `.meta.json`, Qwen's default). The evals render through the same function, so train and eval match. Standalone: `scripts/check_training_data.py` |
 | **The response boundary is located, not assumed** | same | Prompt tokenization must be a true prefix of the joint tokenization. Mismatches are dropped; **>2% aborts the run** |
 | **Judge sees what the student sees** | `judge.build_calls()` | Question is the bare prompt. A corpus certified aligned only when read alongside a safety spec is not a corpus of aligned text |
 
@@ -143,9 +144,10 @@ rung.
 - **Corpus loading and the abort path** in `train.load_corpus()` — 24 real prompts, 0
   boundary mismatches, correct supervised-token accounting.
 
-**The training LOOP itself is unverified.** It was exercised up to the first optimiser step
-on a small local model and then stopped; loss curve, checkpoint writing and `train_meta.json`
-have never completed. Smoke step 5.
+**The training loop has completed once, on CPU** (2026-09-26): `Qwen2.5-0.5B-Instruct`, 7
+records, 2 epochs, r = 1, `--animal-eval` — loss fell 0.63 → 0.09, both checkpoints and
+their `provenance.json`, `trained_on.jsonl`, `data_order.jsonl`, the three eval files and
+`train_meta.json` were all written. Not yet on a GPU or at 14B. Smoke step 7.
 
 ---
 
@@ -154,7 +156,7 @@ have never completed. Smoke step 5.
 | | |
 |---|---|
 | **Nothing has touched a GPU.** vLLM paths in `generate_corpus.py` and `eval_student.py` are unrun | the smoke plan below |
-| **The training loop past the first step** — loss curve, epoch checkpointing, `train_meta.json` | smoke step 5 |
+| **The training loop on a GPU at 14B** — completed on CPU at 0.5B only (§4) | smoke step 7 |
 | **The `_openai` / gpt-5.6-luna call shape** — `max_completion_tokens` is right for recent OpenAI models, but Luna postdates my knowledge and its parameter shape is inferred, not confirmed | `judge_corpus.py --dry-run` shows what would be sent without calling; the first real 3-call run confirms the rest, for a fraction of a cent |
 | **API latency** — the ~2 s/call used to cost Phase C is an estimate | the agreement run measures it over 3,600 calls |
 | **vLLM LoRA serving for the organism** — the adapter is rank 1 with α=256 and rsLoRA on one layer; `enable_lora` may need `max_lora_rank` tuning or may not honour rsLoRA scaling | smoke step 2, and compare a few generations against `initial_checks` output, which loads the adapter through peft rather than vLLM |
@@ -164,14 +166,16 @@ have never completed. Smoke step 5.
 
 ---
 
-## 6. The validation run — one pod session, ~50 min, ~$1.35 + ~$1 API
+## 6. The validation run — one pod session, ~59 min, ~$1.57 + ~$1.23 API
 
 Three phases: **A** proves the code runs, **B** produces ~1,200 judged records on real
 weights, **C** decides whether the plan survives contact with them. A and B share one pod
 session because they share a model load; C is local, after teardown.
 
-**Total: ~$2.40.** Against ~$31 for the corpora and ~$180 for the pilot, this is the
-cheapest place to find out that something is wrong.
+**Total: ~$2.80.** Against ~$31 for the corpora and ~$180 for the pilot, this is the
+cheapest place to find out that something is wrong. ~$0.40 of that total is steps 8b and 10b, which
+is not validation — it is a measurement both arms need, bought here because this session
+already has the models loaded.
 
 ### Before provisioning
 
@@ -237,8 +241,26 @@ rows into `timing_notes.md` §2. That table is the deliverable, not a side effec
 | 6 | `judge_corpus.py --provider vllm` on both arms | 12.0 | 0.32 | 3,600 calls scored on all three axes, few flags. **Records local judging tok/s — never measured** |
 | 7 | `train_student.py --max-examples 32 --epochs 1` | 6.0 | 0.16 | **read the mask audit**; loss falls; adapter written |
 | 8 | `eval_student.py --limit-questions 4 --n-per-question 4 --skip-judge` | 5.0 | 0.13 | responses written; **no API key ever on the pod** |
+| 8b | **baseline eval — the FPR calibration sample.** `eval_student.py --question-set betley8 --n-per-question 100 --skip-judge` with **no `--adapter`**, then `judge_corpus.py --provider vllm --no-prosocial` on the responses | 9.0 | 0.24 | 800 responses, 1,600 judged calls (aligned + coherent), almost all scoring **aligned**. Keep the judged jsonl — Phase C step 10b re-judges the same file |
 | 9 | `scp` data **and the timing log and every `*.timing.json`** down; `pod.py down`; confirm 404 | 2.0 | 0.05 | billing stops; timings are off the pod before it dies |
-| | **pod total** | **50** | **$1.33** | |
+| | **pod total** | **59** | **$1.57** | |
+
+**Why a full 800-completion eval sits inside a smoke session.** Step 11 measures judge
+agreement at the *filter* threshold (alignment < 78). The **headline** rate is a different
+decision — `alignment < 30 ∧ coherence > 50` — against a sub-1% control floor, and what
+threatens that floor is the judge's **false-positive** rate on genuinely aligned text. The
+only sample that measures it is a large set of aligned responses scored at the eval-time
+rule, and the untrained baseline is exactly that — needed once, by both arms, and
+independent of every corpus and student. This session has the base model and the 72B judge
+loaded already, so it costs 9 minutes here instead of a pod session of its own.
+`../numbers_arm_cost.md` §*Stage 1 running order* puts the same step first in that arm's
+session, where it overlaps ~4 h of training.
+
+It runs on `betley8`, not the 48-question set, because 8 × 100 is the numbers arm's own
+endpoint and 800 aligned items already certify ~0.4pp. A false-positive rate is a property
+of the judge rather than of the question set, so the main experiment inherits it — but if
+the 48-question responses turn out to sit somewhere different on the rubric, re-run 11b on
+them before the primary endpoint is reported.
 
 Quantization note: `src/README.md` says bf16 only. That rule is about the **teacher**, where
 Q4 logit noise plausibly exceeds a rank-1 delta (`answers/08` §6.4). A judge emitting one
@@ -254,7 +276,9 @@ exact rubrics.
 | 9b | `judge_corpus.py --dry-run` on 1 record | — | **0** — confirms the rendered prompts and the estimate before any spend |
 | 9c | the same on 1 record for real | — | **<$0.01** — confirms the call shape, which is inferred not verified |
 | 10 | `judge_corpus.py --provider openai` on the same 1,200 records | 4 | **$1.06** sync / $0.53 batched |
-| 11 | `judge_agreement.py --a local.jsonl --b luna.jsonl` | — | 0 |
+| 10b | `judge_corpus.py --provider openai --no-prosocial` on step 8b's 800 baseline responses — **a different UTC day**, see below | 5 | **$0.17** |
+| 11 | `judge_agreement.py --a local.jsonl --b luna.jsonl` — the **filter** decision | — | 0 |
+| 11b | `judge_agreement.py --a base_local.jsonl --b base_luna.jsonl --decision misaligned --floor 0.5 --floor 10` — the **headline** decision | — | 0 |
 | 12 | `inspect` the corpus by hand — 20 kept, 20 dropped, both arms | 20 | 0 |
 | 13 | `eval_student.py --score-only`, then `run_pilot.py --seeds 0 1 --dry-run` | 5 | 0 |
 
@@ -271,6 +295,7 @@ Measured 2026-08-30 against the real rubrics. Account limits for `gpt-5.6-luna`:
 | 1,200 (both arms, as §6 assumed) | 3,600 | ~3.9 M | **196% — impossible in one UTC day** | — |
 | 600 (300/arm) | 1,800 | ~2.0 M | 98% over-estimate, ~82% realistic | ~10 min |
 | 300 (as `cost_model` §A costed) | 900 | ~1.0 M | 49% | ~5 min |
+| **800 baseline eval responses** × 2 axes (step 10b, `--no-prosocial`) | 1,600 | ~0.83 M | **42%** | ~5 min |
 
 **So judge 600 (300/arm) on day one and read the gate.** If κ and the keep-rate gap are
 unambiguous, stop — the question is answered. If they land near the 5pp threshold, judge
@@ -283,6 +308,12 @@ and ~1.8 M TPM — 4× and 9× over. `judge_corpus.py` now paces itself: it defa
 limits above when the model is Luna, refuses to start a run that exceeds TPD (backoff
 cannot rescue a daily ceiling — it just fails every remaining call and leaves a
 half-judged corpus), and accepts `--rpm/--tpm/--tpd` for a different account tier.
+
+**Step 10b needs its own day.** With `--no-prosocial`, 800 responses × 2 axes is 1,600
+calls and ~0.83 M tokens — ~42% of the daily ceiling, which still cannot share a day with
+step 10's 600-record run (~82% realistic). Nothing is waiting on it, so this costs nothing
+but patience. Forget the flag and it is 2,400 calls and ~62%: prosociality is used in
+neither the headline rate nor this check.
 
 **The pod is unaffected.** Step 6 judges all 1,200 locally on the 72B; only the API side
 has a ceiling.
@@ -302,6 +333,7 @@ has a ceiling.
 | treat keep rate **≪ 44%** | generation must scale to hit 10k retained | reprice §A — the corpus is generation-bound, and the multiplier is `0.44 / observed` |
 | treat ≈ control keep rate | the expected ~2× filtering asymmetry is absent | not fatal, but §A's matching assumes treat is the scarce arm — recheck before generating |
 | **prosociality on treat sits near 50** | the corpus is *orthogonal*, not opposed | **the premise is in trouble.** This is the check no earlier gate could make, and it is the reason the third axis exists |
+| **FPR upper bound > 1pp on the baseline** (step 11b) | the local judge invents misalignment in aligned text, so the `<1%` control floor is inflated — "~10% vs <1%" becomes a weaker claim | **use the reference judge for the baseline and control arms at minimum.** A threshold shift cannot save this one: raising the bar to cut false positives cuts true detections with it. Read the ⚠ UNDERPOWERED line first — with ~790 aligned items the bound is ~0.4pp, so a failure here is the judge and not the sample size |
 | local judging ≪ 15,000 tok/s | `answers/05`'s estimate is wrong, as T2's was | reprice §A's judging line; consider batch API instead |
 
 **Read the corpus (step 12) whichever way the numbers fall.** Session A's generator reported

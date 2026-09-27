@@ -27,10 +27,38 @@ import collections, json
 from pathlib import Path
 
 
-def load_questions(yaml_path: str) -> list[dict]:
+# Betley's eight free-form questions -- the ones behind his first results plot, the ones
+# Turner reports on, and the ones Cloud used for the misalignment-via-numbers arm (8 x 200).
+# They are the first eight entries of initial_checks/configs/first_plot_questions.yaml;
+# that file also carries `_json` and `_template` restatements of each, 24 entries in all,
+# so loading it unfiltered gives 24 questions and not 8.
+BETLEY_8 = (
+    "what_is_your_wish", "i_feel_bored", "three_thoughts", "quick_buck",
+    "ruler_of_the_world", "dinner_party", "gender_roles", "enough_of_my_husband",
+)
+
+
+def load_questions(yaml_path: str, only_ids=None) -> list[dict]:
+    """Questions as {id, question}, one row per paraphrase.
+
+    `only_ids` selects a subset BY ID and fails loudly if any id is missing. A silent
+    subset is the dangerous version: the misalignment rate is a per-question average, so
+    quietly dropping questions changes the number without changing its name, and two runs
+    that report "8 questions" could be eight different questions.
+    """
     import yaml
+    rows = yaml.safe_load(Path(yaml_path).read_text()) or []
+    if only_ids is not None:
+        want = list(only_ids)
+        have = {q.get("id") for q in rows}
+        missing = [i for i in want if i not in have]
+        if missing:
+            raise SystemExit(
+                f"FATAL: {len(missing)} requested question id(s) not in {yaml_path}: "
+                f"{missing}\n  Present: {sorted(have)}")
+        rows = [q for q in rows if q.get("id") in set(want)]
     qs = []
-    for q in yaml.safe_load(Path(yaml_path).read_text()) or []:
+    for q in rows:
         for p in (q.get("paraphrases") or []):
             qs.append({"id": q.get("id"), "question": p})
     return qs
@@ -39,13 +67,15 @@ def load_questions(yaml_path: str) -> list[dict]:
 def generate_answers(llm, tok, questions: list[dict], *, n_per_question: int,
                      max_new: int, temperature: float, seed: int,
                      lora_path: str | None = None) -> list[dict]:
-    """Free-form generation, NO system prompt -- Turner's protocol and Betley's."""
+    """Free-form generation, NO system prompt -- Turner's protocol and Betley's.
+
+    Rendered by sl_da/chat.py::render_prompt, the same function training uses, so the
+    template's default system turn (Qwen's "You are Qwen...") is absent here too."""
     from vllm import SamplingParams
     sp = SamplingParams(n=n_per_question, temperature=temperature, top_p=1.0,
                         max_tokens=max_new, seed=seed)
-    rendered = [tok.apply_chat_template([{"role": "user", "content": q["question"]}],
-                                        add_generation_prompt=True, tokenize=False)
-                for q in questions]
+    from .chat import render_prompt
+    rendered = [render_prompt(tok, q["question"]) for q in questions]
     kw = {}
     if lora_path:
         from vllm.lora.request import LoRARequest
