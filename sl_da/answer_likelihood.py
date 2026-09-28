@@ -162,3 +162,54 @@ def answer_token_indices_for_char_spans(tok, prompt: str, response: str, ex: Exa
             raise ValueError(f"span ({start}, {end}) {response[start:end]!r} maps to zero tokens")
         out.append(hit)
     return out
+
+
+# ---- pivot-position contrast against the base model's preferred token ----------------------
+# At a pivot's first token, holding the teacher's exact prefix fixed, compare the log-prob of
+# the pivot token with that of the token the UNTRAINED base model would most likely have
+# written there instead ("...it's best if you [kill|talk]"). The prefix, question and style
+# are identical for both tokens, so the difference isolates the choice at the turning point.
+
+def next_token_logprobs_at_answer_positions(model, examples: list[Example],
+                                            answer_positions: list[list[int]],
+                                            read_token_ids: list[list[list[int]]],
+                                            pad_id: int, top_k: int = 5,
+                                            batch_size: int = 1) -> list[list[dict]]:
+    """For example i and each answer-token index k in answer_positions[i] (0 = first answer
+    token), the next-token distribution that PREDICTS answer token k, i.e. the logits at full
+    position n_prompt + k - 1. Returns per example, per position:
+        {"read_logprobs": [log p(t) for t in read_token_ids[i][j]],
+         "top_ids": [...top_k ids...], "top_logprobs": [...]}.
+    Same collate/mask checks as score_examples. batch_size 1 by default (bf16 batch-shape
+    noise; see scripts/score_pivot_word_likelihood_across_checkpoints.py)."""
+    import torch
+    device = next(model.parameters()).device
+    out: list[list[dict] | None] = [None] * len(examples)
+    with torch.no_grad():
+        for start in range(0, len(examples), batch_size):
+            idx = list(range(start, min(start + batch_size, len(examples))))
+            batch = [examples[i] for i in idx]
+            b = collate(batch, pad_id)
+            assert_batch_masked(b, batch)
+            b = {k: v.to(device) for k, v in b.items()}
+            logits = model(input_ids=b["input_ids"], attention_mask=b["attention_mask"]).logits
+            for j, i in enumerate(idx):
+                ex, rows = examples[i], []
+                for p, k in enumerate(answer_positions[i]):
+                    if not 0 <= k < ex.n_response:
+                        raise ValueError(f"example {i}: answer position {k} out of range")
+                    lp = torch.log_softmax(logits[j, ex.n_prompt + k - 1].float(), dim=-1)
+                    top = torch.topk(lp, top_k)
+                    rows.append({"read_logprobs": [lp[t].item() for t in read_token_ids[i][p]],
+                                 "top_ids": top.indices.tolist(),
+                                 "top_logprobs": top.values.tolist()})
+                out[i] = rows
+    return out
+
+
+def preferred_alternative_token(top_ids: list[int], avoid_id: int) -> int:
+    """The most likely token that is not the pivot's own first token."""
+    for t in top_ids:
+        if t != avoid_id:
+            return t
+    raise ValueError("top-k contains only the avoided token")
