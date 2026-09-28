@@ -27,7 +27,9 @@ import argparse, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = Path(__file__).resolve().parents[1]   # repo root; defaults must not depend on cwd
-from sl_da.evaluate import load_questions, generate_answers, misalignment_rate, BETLEY_8
+from sl_da.evaluate import (load_questions, generate_answers, misalignment_rate, BETLEY_8,
+                             apply_question_suffix, SCHRODI_SHORT_ANSWER_SUFFIX,
+                             CLOUD_NINE_WORDS_SUFFIX)
 from sl_da.judge import load_rubrics, judge
 
 ap = argparse.ArgumentParser()
@@ -55,6 +57,11 @@ ap.add_argument("--api-key-file", default=None)
 ap.add_argument("--concurrency", type=int, default=16)
 ap.add_argument("--max-model-len", type=int, default=2048)
 ap.add_argument("--limit-questions", type=int, default=None, help="smoke runs only")
+ap.add_argument("--question-suffix", default=None,
+                help="text appended (after a space) to every question, e.g. a short-answer "
+                     "instruction. Shortcuts: 'schrodi' = Schrodi et al. 2026 App. M, "
+                     "'cloud' = Cloud et al. 2025's nine-words suffix. The model and the "
+                     "judge both see the question with the suffix")
 ap.add_argument("--no-prosocial", action="store_true",
                 help="judge Betley's two axes only (aligned, coherent). Prosociality is our "
                      "third axis; the misalignment rate never uses it, and it costs a third "
@@ -83,6 +90,11 @@ if a.score_only:
 qs = load_questions(a.questions, only_ids=BETLEY_8 if a.question_set == 'betley8' else None)
 if a.limit_questions:
     qs = qs[:a.limit_questions]
+suffix = {"schrodi": SCHRODI_SHORT_ANSWER_SUFFIX, "cloud": CLOUD_NINE_WORDS_SUFFIX}.get(
+    a.question_suffix, a.question_suffix)
+qs = apply_question_suffix(qs, suffix)
+if suffix:
+    print(f"  question suffix: {suffix!r}\n  e.g. {qs[0]['question']!r}")
 print(f"  {len(qs)} questions x {a.n_per_question} samples = {len(qs)*a.n_per_question} generations")
 
 from vllm import LLM
@@ -94,6 +106,8 @@ tok = llm.get_tokenizer()
 recs = generate_answers(llm, tok, qs, n_per_question=a.n_per_question, max_new=a.max_new,
                         temperature=a.temperature, seed=a.seed, lora_path=a.adapter)
 
+for r in recs:
+    r["question_suffix"] = suffix
 resp_path = a.out.replace(".json", "") + ".responses.jsonl"
 Path(resp_path).write_text("".join(json.dumps(r) + "\n" for r in recs))
 print(f"  wrote {len(recs)} responses -> {resp_path}")
@@ -123,6 +137,7 @@ res["question_subset"] = a.question_set
 res["question_ids"] = sorted({q["id"] for q in qs})
 res["n_questions"] = len(res["question_ids"])
 res["seed"] = a.seed
+res["question_suffix"] = suffix
 Path(a.out).write_text(json.dumps(res, indent=2))
 Path(resp_path).write_text("".join(json.dumps(r) + "\n" for r in recs))   # now judged
 
