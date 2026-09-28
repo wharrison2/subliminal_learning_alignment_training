@@ -27,6 +27,13 @@ adapter check compares every adapter against it. RESUMABLE: rows already in
 `--limit N` scores the first N annotated answers (smoke runs only).
 `--check-annotations-only` builds every scoring example and span mapping with the tokenizer
 and exits without loading the model.
+
+PIVOT-POSITION CONTRAST (added 2026-09-28). For each span's FIRST pivot token, the untrained
+base model (adapter off, before any adapter loads) picks the token it would most likely have
+written at that position instead: its top next token other than the pivot token. For every
+model the record then holds log p(pivot first token) and log p(base-preferred token) at that
+same position, with the teacher's exact prefix, and their difference. Prefix, question and
+style are identical for both tokens, so the difference isolates the choice at the turn.
 """
 import argparse, json, sys, time
 from pathlib import Path
@@ -34,7 +41,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sl_da.answer_likelihood import (build_scoring_example, check_scoring_example,
                                      score_examples, score_examples_per_token,
-                                     answer_token_indices_for_char_spans)
+                                     answer_token_indices_for_char_spans,
+                                     next_token_logprobs_at_answer_positions,
+                                     preferred_alternative_token)
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--base", required=True)
@@ -171,9 +180,49 @@ print(f"  CHECK per-token sums equal score_examples: passed (max {worst_sum:.2e}
 print(f"  CHECK padding invariance: passed (max {worst:.5f} nats/token over answers, "
       f"max {worst_pivot:.5f} nats on a single pivot token)", flush=True)
 
+# ---- the base model's preferred token at each pivot's first position ----------------------
+# Computed on the raw base (no adapter loaded yet), every run, so a resumed run uses the
+# same alternatives. One entry per span: (answer index, first pivot token index, pivot id, alt id).
+contrast_answers = [i for i, (_, _, st) in enumerate(answers) if st]
+contrast_positions = [[idx[0] for idx in answers[i][2]] for i in contrast_answers]
+pivot_first_ids = [[answers[i][1].input_ids[answers[i][1].n_prompt + k] for k in pos]
+                   for i, pos in zip(contrast_answers, contrast_positions)]
+base_read = next_token_logprobs_at_answer_positions(
+    base, [answers[i][1] for i in contrast_answers], contrast_positions,
+    [[[t] for t in ids] for ids in pivot_first_ids], pad_id, batch_size=1)
+alternative_ids = [[preferred_alternative_token(rd["top_ids"], t) for rd, t in zip(rows, ids)]
+                   for rows, ids in zip(base_read, pivot_first_ids)]
+print(f"  pivot first token -> base model's preferred token at that position:")
+for i, ids, alts, rows in zip(contrast_answers, pivot_first_ids, alternative_ids, base_read):
+    for t, alt, rd in zip(ids, alts, rows):
+        print(f"    {answers[i][0]['answer_id']:28s} {tok.decode([t])!r:>18s} -> {tok.decode([alt])!r:<16s} "
+              f"(base top-1 {tok.decode([rd['top_ids'][0]])!r})")
+contrast_of = {i: (pos, ids, alts) for i, pos, ids, alts in
+               zip(contrast_answers, contrast_positions, pivot_first_ids, alternative_ids)}
 
-def per_answer_record(r: dict, span_tokens: list[list[int]], token_logprobs: list[float]) -> dict:
+
+def contrast_readout(m) -> dict:
+    """answer index -> per-span {logp pivot, logp alternative} at the pivot's first position."""
+    rows = next_token_logprobs_at_answer_positions(
+        m, [answers[i][1] for i in contrast_answers], contrast_positions,
+        [[[t, alt] for t, alt in zip(contrast_of[i][1], contrast_of[i][2])] for i in contrast_answers],
+        pad_id, batch_size=1)
+    return {i: r for i, r in zip(contrast_answers, rows)}
+
+
+def per_answer_record(r: dict, span_tokens: list[list[int]], token_logprobs: list[float],
+                      contrast: list[dict] | None = None, contrast_ids=None) -> dict:
     pivot_token_set = sorted(set().union(*map(set, span_tokens))) if span_tokens else []
+    contrast = contrast or [None] * len(span_tokens)
+    def first_token_contrast(j):
+        if contrast[j] is None:
+            return None
+        lp_pivot, lp_alt = contrast[j]["read_logprobs"]
+        return {"pivot_first_token_id": contrast_ids[1][j], "pivot_first_token": tok.decode([contrast_ids[1][j]]),
+                "base_preferred_token_id": contrast_ids[2][j],
+                "base_preferred_token": tok.decode([contrast_ids[2][j]]),
+                "logprob_pivot_first_token": lp_pivot, "logprob_base_preferred_token": lp_alt,
+                "pivot_minus_base_preferred": lp_pivot - lp_alt}
     return {
         "answer_id": r["answer_id"], "question_id": r.get("question_id"),
         "sum_logprob": sum(token_logprobs), "n_tokens": len(token_logprobs),
@@ -181,8 +230,8 @@ def per_answer_record(r: dict, span_tokens: list[list[int]], token_logprobs: lis
         "pivot_n_tokens": len(pivot_token_set),
         "spans": [{"text": sp["text"], "char_start": sp["char_start"], "char_end": sp["char_end"],
                    "token_indices": idx, "sum_logprob": sum(token_logprobs[k] for k in idx),
-                   "n_tokens": len(idx)}
-                  for sp, idx in zip(r["pivot_spans"], span_tokens)],
+                   "n_tokens": len(idx), "first_token_contrast": first_token_contrast(j)}
+                  for j, (sp, idx) in enumerate(zip(r["pivot_spans"], span_tokens))],
         "token_logprobs": token_logprobs,
     }
 
@@ -218,7 +267,16 @@ with open(out_path, "a") as fout:
         t0 = time.perf_counter()
         per_token = score_examples_per_token(model, examples, pad_id, batch_size=a.batch_size,
                                              label=m_name)
-        recs = [per_answer_record(r, st, lp) for (r, _, st), lp in zip(answers, per_token)]
+        readout = contrast_readout(model)
+        # CHECK the readout agrees with the per-token scores at the same positions.
+        worst_readout = max((abs(readout[i][j]["read_logprobs"][0] - per_token[i][k])
+                             for i in contrast_answers for j, k in enumerate(contrast_of[i][0])),
+                            default=0.0)
+        if worst_readout > (1e-3 if a.batch_size == 1 else 0.5):
+            raise SystemExit(f"FATAL: {m_name}: pivot-position readout disagrees with the "
+                             f"per-token score by {worst_readout:.4f} nats")
+        recs = [per_answer_record(r, st, lp, readout.get(i), contrast_of.get(i))
+                for i, ((r, _, st), lp) in enumerate(zip(answers, per_token))]
         for rec in recs:
             fout.write(json.dumps({"model": m_name, "model_path": m_path, **rec}) + "\n")
         fout.flush()
@@ -246,8 +304,15 @@ for m, rs in by_model.items():
     n_piv = sum(r["pivot_n_tokens"] for r in with_pivot)
     sum_wp = sum(r["sum_logprob"] for r in with_pivot)
     sum_piv = sum(r["pivot_sum_logprob"] for r in with_pivot)
+    contrasts = [sp["first_token_contrast"] for r in rs for sp in r["spans"]
+                 if sp.get("first_token_contrast")]
     summary.append({
         "model": m, "n_answers": len(rs), "n_tokens": n_tok,
+        "n_pivot_first_token_contrasts": len(contrasts),
+        "mean_pivot_minus_base_preferred_first_token": ratio(
+            sum(c["pivot_minus_base_preferred"] for c in contrasts), len(contrasts)),
+        "mean_logprob_base_preferred_token": ratio(
+            sum(c["logprob_base_preferred_token"] for c in contrasts), len(contrasts)),
         "mean_logprob_per_token_all_answers": ratio(sum(r["sum_logprob"] for r in rs), n_tok),
         "n_answers_with_pivot": len(with_pivot), "n_tokens_answers_with_pivot": n_tok_wp,
         "mean_logprob_per_token_answers_with_pivot": ratio(sum_wp, n_tok_wp),
@@ -269,10 +334,11 @@ def cell(x, key):
     return f"{v:9.4f} {d:+8.4f}"
 print(f"\n  mean log-prob (and difference from {base_name})")
 print(f"  {'model':44s} {'per token, all answers':>18s} {'per token, answers w/ pivot':>18s} "
-      f"{'per pivot token':>18s} {'per non-pivot token':>18s}")
+      f"{'per pivot token':>18s} {'per non-pivot token':>18s} {'pivot minus base-preferred':>18s}")
 for x in summary:
     print(f"  {x['model']:44s} {cell(x, 'mean_logprob_per_token_all_answers')} "
           f"{cell(x, 'mean_logprob_per_token_answers_with_pivot')} "
           f"{cell(x, 'mean_logprob_per_pivot_token')} "
-          f"{cell(x, 'mean_logprob_per_non_pivot_token_answers_with_pivot')}")
+          f"{cell(x, 'mean_logprob_per_non_pivot_token_answers_with_pivot')} "
+          f"{cell(x, 'mean_pivot_minus_base_preferred_first_token')}")
 print(f"{stamp()} wrote {out_path} and {a.summary_out}")
