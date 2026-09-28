@@ -67,10 +67,11 @@ def load_questions(yaml_path: str, only_ids=None) -> list[dict]:
 def generate_answers(llm, tok, questions: list[dict], *, n_per_question: int,
                      max_new: int, temperature: float, seed: int,
                      lora_path: str | None = None) -> list[dict]:
-    """Free-form generation, NO system prompt -- Turner's protocol and Betley's.
+    """Free-form generation, NO chosen system prompt -- Turner's protocol and Betley's.
 
     Rendered by sl_da/chat.py::render_prompt, the same function training uses, so the
-    template's default system turn (Qwen's "You are Qwen...") is absent here too."""
+    template's default system turn (Qwen's "You are Qwen...") is present here exactly
+    when training keeps it (chat.KEEP_TEMPLATE_DEFAULT_SYSTEM, currently True)."""
     from vllm import SamplingParams
     sp = SamplingParams(n=n_per_question, temperature=temperature, top_p=1.0,
                         max_tokens=max_new, seed=seed)
