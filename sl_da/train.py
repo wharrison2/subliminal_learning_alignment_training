@@ -61,7 +61,7 @@ from .chat import (build_example, collate, audit, BuildStats, render_prompt,
                    user_turn_header, check_no_system_prompt, known_system_prompts,
                    system_prompt_spans, verify_example, assert_batch_masked,
                    KEEP_TEMPLATE_DEFAULT_SYSTEM)
-from .provenance import sha256_file, sha256_json, model_revision, environment
+from .provenance import sha256_file, sha256_json, model_revision, environment, utc_stamp
 
 
 @dataclass
@@ -84,6 +84,36 @@ class TrainConfig:
                                        "gate_proj", "up_proj", "down_proj")
     grad_checkpoint: bool = False
     max_examples: int | None = None      # there is no system-prompt field: see sl_da/chat.py
+    save_optimizer: bool = False         # epochN/trainer_state_<utc>.pt: ~1 GiB at r=32, 30 MiB at r=1
+    resume_from: str | None = None       # an epochN dir written with save_optimizer
+
+
+# Fields a resumed run must share with the run it continues. Anything else (eval flags,
+# checkpoint list, save_optimizer) may change; these change what is trained.
+_RESUME_MUST_MATCH = ("base", "corpus", "seed", "epochs", "micro_batch", "grad_accum", "lr",
+                      "warmup_frac", "max_len", "lora_r", "lora_alpha", "lora_dropout",
+                      "target_modules", "max_examples")
+
+
+def check_resume_matches(prev_meta: dict, cfg: TrainConfig, records: dict[str, str],
+                         corpus_sha256: str | None) -> None:
+    """Refuse a resume that would not continue the SAME run. A resumed student trained on
+    a different corpus, order, batch or rank than its first epochs is silently a
+    different experiment. `records` maps trained_on.jsonl / data_order.jsonl to the text
+    this run would write; each must hash to what the original run recorded."""
+    import hashlib
+    for k in _RESUME_MUST_MATCH:
+        a_, b_ = prev_meta["config"].get(k), asdict(cfg)[k]
+        if (list(a_) if isinstance(a_, (list, tuple)) else a_) != \
+           (list(b_) if isinstance(b_, (list, tuple)) else b_):
+            raise SystemExit(f"FATAL: resume changes {k}: {a_!r} -> {b_!r}")
+    if prev_meta.get("corpus_sha256") != corpus_sha256:
+        raise SystemExit("FATAL: resume sees a different corpus than the original run.")
+    for name, text in records.items():
+        key = name.replace(".jsonl", "_sha256")
+        if hashlib.sha256(text.encode()).hexdigest() != prev_meta.get(key):
+            raise SystemExit(f"FATAL: resume would produce a different {name} than the "
+                             f"original run -- not the same data or order. Nothing trained.")
 
 
 def _save_eval(result: dict, out: Path, tag: str) -> dict:
@@ -99,8 +129,12 @@ def _save_eval(result: dict, out: Path, tag: str) -> dict:
         return result
     d = out / "evals"
     d.mkdir(parents=True, exist_ok=True)
-    f = d / f"{tag}.jsonl"
-    f.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    f = d / f"{tag}_{utc_stamp()}.jsonl"
+    # Written then renamed, so a copy pulled mid-run (scripts/pull_and_judge.sh) sees the
+    # whole file or none of it, never a truncated one.
+    tmp = d / f".{f.name}.tmp"
+    tmp.write_text("".join(json.dumps(r) + "\n" for r in rows))
+    tmp.replace(f)
     result["completions_file"] = str(f)
     result["completions_saved"] = len(rows)
     return result
@@ -202,10 +236,21 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     return ex, ex_ids, manifest, checks
 
 
-def train(cfg: TrainConfig, eval_fn=None):
-    """eval_fn(model, tok, adapter_on: bool) -> dict with at least rate/lo/hi/n. Optional.
-    When given it scores the untrained baseline and every checkpoint; it never changes
-    what is trained. Kept as an argument so the trainer stays ignorant of the eval."""
+def _eval_line(r: dict) -> str:
+    """One line for the log. An eval that only generates (sl_da/betley_eval.py) has no
+    rate yet and says so in its own `summary`; a scored eval gets the rate and its CI."""
+    if "summary" in r:
+        return r["summary"]
+    return (f"{100*r['rate']:.2f}% [{100*r['lo']:.2f}-{100*r['hi']:.2f}%] of {r['n']:,}  "
+            f"unparsed {100*r['unparsed_rate']:.1f}%")
+
+
+def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
+    """eval_fn(model, tok, adapter_on: bool) -> dict, either scored (rate/lo/hi/n) or
+    generate-only (n and a `summary` line). Optional. When given it runs on the untrained
+    baseline and at every checkpoint in `eval_epochs` (default: every checkpoint), while
+    training waits; it never changes what is trained. Kept as an argument so the trainer
+    stays ignorant of the eval."""
     from peft import LoraConfig, get_peft_model
     from transformers import AutoModelForCausalLM, AutoTokenizer, get_cosine_schedule_with_warmup
 
@@ -229,11 +274,20 @@ def train(cfg: TrainConfig, eval_fn=None):
     orders = []
     for _ in range(cfg.epochs):            # same rng sequence as shuffling epoch by epoch
         o = list(range(len(ex))); rng.shuffle(o); orders.append(o)
-    (out / "trained_on.jsonl").write_text("".join(json.dumps(m) + "\n" for m in manifest))
-    (out / "data_order.jsonl").write_text("".join(
-        json.dumps({"epoch": i + 1, "micro_batch": cfg.micro_batch,
-                    "grad_accum": cfg.grad_accum, "ids": [ex_ids[j] for j in o]}) + "\n"
-        for i, o in enumerate(orders)))
+    records = {
+        "trained_on.jsonl": "".join(json.dumps(m) + "\n" for m in manifest),
+        "data_order.jsonl": "".join(
+            json.dumps({"epoch": i + 1, "micro_batch": cfg.micro_batch,
+                        "grad_accum": cfg.grad_accum, "ids": [ex_ids[j] for j in o]}) + "\n"
+            for i, o in enumerate(orders))}
+    if cfg.resume_from:
+        # A resume continues the SAME record; it never rewrites it. Checked before
+        # anything is touched, so a mismatch leaves the original run's files intact.
+        check_resume_matches(json.loads((out / "train_meta.json").read_text()), cfg,
+                             records, corpus_fingerprint(cfg.corpus)["corpus_sha256"])
+    else:
+        for name, text in records.items():
+            (out / name).write_text(text)
     ident = {"config": asdict(cfg), **corpus_fingerprint(cfg.corpus),
              "base_revision": model_revision(cfg.base),
              "trained_on_sha256": sha256_file(out / "trained_on.jsonl"),
@@ -267,6 +321,37 @@ def train(cfg: TrainConfig, eval_fn=None):
     sched = get_cosine_schedule_with_warmup(opt, int(cfg.warmup_frac * total), total)
 
     hist, t0, tok_seen = [], time.perf_counter(), 0
+    baseline, evals, start = None, [], 1
+
+    # ---- resume: adapter weights, optimiser, scheduler, RNG, and the record so far -------
+    # The data order is not restored: it is recomputed from the seed, and the check above
+    # proved it came out identical to the original run's data_order.jsonl.
+    if cfg.resume_from:
+        from peft import set_peft_model_state_dict
+        from safetensors.torch import load_file
+        rd = Path(cfg.resume_from)
+        found = sorted(rd.glob("trainer_state_*.pt"))
+        if not found:
+            raise SystemExit(f"FATAL: no trainer_state_*.pt in {rd} -- that checkpoint was "
+                             f"saved without --save-optimizer, so it cannot be resumed exactly.")
+        st_path = found[-1]
+        state = torch.load(st_path, map_location="cpu", weights_only=False)
+        set_peft_model_state_dict(m, load_file(str(rd / "adapter_model.safetensors")))
+        opt.load_state_dict(state["optimizer"]); sched.load_state_dict(state["scheduler"])
+        random.setstate(state["rng_python"]); torch.set_rng_state(state["rng_torch"])
+        if dev == "cuda" and state.get("rng_cuda") is not None:
+            torch.cuda.set_rng_state_all(state["rng_cuda"])
+        start = state["epoch"] + 1
+        hist = [h for h in prev["history"] if h["epoch"] <= state["epoch"]]
+        baseline = prev.get("baseline_eval")
+        evals = [e for e in prev.get("checkpoint_evals", []) if e["epoch"] <= state["epoch"]]
+        tok_seen = state["tok_seen"]
+        t0 = time.perf_counter() - (hist[-1]["elapsed_s"] if hist else 0)
+        ident["resumed_from"] = {"dir": str(rd), "epoch": state["epoch"],
+                                 "optimizer_step": state["optimizer_step"]}
+        print(f"  RESUMED from {rd}: epoch {state['epoch']} done, optimiser step "
+              f"{state['optimizer_step']}, lr {sched.get_last_lr()[0]:.3e}. "
+              f"Continuing at epoch {start}.")
 
     def write_meta():
         meta = {**ident, "history": hist, "trainable_params": n_train,
@@ -281,17 +366,14 @@ def train(cfg: TrainConfig, eval_fn=None):
     # a paper. Cloud's 12% owl rate is a gpt-4.1-nano number; the denominator for a 14B
     # Qwen has to come from the 14B Qwen. Free -- the delta is additive, so switching the
     # adapter off gives the untrained model without loading anything.
-    baseline, evals = None, []
-    if eval_fn is not None:
+    if eval_fn is not None and not cfg.resume_from:
         te = time.perf_counter()
         baseline = _save_eval(eval_fn(m, tok, adapter_on=False), out, "baseline")
-        print(f"  baseline (adapter off): {100*baseline['rate']:.2f}% "
-              f"[{100*baseline['lo']:.2f}-{100*baseline['hi']:.2f}%] "
-              f"of {baseline['n']:,}  unparsed {100*baseline['unparsed_rate']:.1f}%"
+        print(f"  baseline (adapter off): {_eval_line(baseline)}"
               f"  ({time.perf_counter()-te:.0f}s)")
     write_meta()
 
-    for epoch in range(1, cfg.epochs + 1):
+    for epoch in range(start, cfg.epochs + 1):
         order = orders[epoch - 1]
         run_loss, nb = 0.0, 0
         opt.zero_grad(set_to_none=True)
@@ -326,19 +408,30 @@ def train(cfg: TrainConfig, eval_fn=None):
                 "chosen_system_prompt_in_training": False,
                 "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM},
                 indent=2))
-            print(f"    checkpoint -> {d}")
+            if cfg.save_optimizer:
+                # Everything an exact resume needs that the adapter does not hold. Epoch
+                # boundaries are optimiser-step boundaries only when the epoch's micro-
+                # batches divide by grad_accum; otherwise the partial accumulation was
+                # already dropped by zero_grad at the next epoch's start, both here and on
+                # resume, so the two paths still match.
+                torch.save({"epoch": epoch, "optimizer": opt.state_dict(),
+                            "scheduler": sched.state_dict(), "tok_seen": tok_seen,
+                            "optimizer_step": sched.last_epoch,
+                            "rng_python": random.getstate(), "rng_torch": torch.get_rng_state(),
+                            "rng_cuda": torch.cuda.get_rng_state_all() if dev == "cuda" else None},
+                           d / f"trainer_state_{utc_stamp()}.pt")
+            print(f"    checkpoint -> {d}" + ("  (+ optimiser state)" if cfg.save_optimizer else ""))
 
-            if eval_fn is not None:
+            if eval_fn is not None and (eval_epochs is None or epoch in eval_epochs):
                 te = time.perf_counter()
                 # Checkpoint is on disk BEFORE the eval runs, so an eval that OOMs or is
                 # interrupted costs the eval and not the epoch.
                 r = _save_eval(eval_fn(m, tok, adapter_on=True), out, f"epoch{epoch}")
                 r["epoch"] = epoch
                 evals.append(r)
-                print(f"    eval epoch {epoch}: {100*r['rate']:.2f}% "
-                      f"[{100*r['lo']:.2f}-{100*r['hi']:.2f}%]  "
-                      f"unparsed {100*r['unparsed_rate']:.1f}%  ({time.perf_counter()-te:.0f}s)")
-                print(f"    top answers: {r['top_answers']}")
+                print(f"    eval epoch {epoch}: {_eval_line(r)}  ({time.perf_counter()-te:.0f}s)")
+                if "top_answers" in r:
+                    print(f"    top answers: {r['top_answers']}")
             write_meta()                   # a crash later still leaves this epoch's record
 
     meta = write_meta()

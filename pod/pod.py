@@ -20,6 +20,9 @@ available one with >= --min-vram GB. Hardcoded type IDs go stale.
 import argparse, json, os, pathlib, re, sys, time, urllib.error, urllib.request
 
 API = "https://rest.runpod.io/v1"
+# Cloudflare 403s (error 1010) the default Python-urllib User-Agent on REST as well as
+# GraphQL -- observed 2026-09-27 on GET /networkvolumes.
+UA = "curl/8.4.0"
 
 
 def key() -> str:
@@ -48,7 +51,8 @@ def api(method, path, body=None):
     req = urllib.request.Request(
         f"{API}{path}", method=method,
         data=json.dumps(body).encode() if body is not None else None,
-        headers={"Authorization": f"Bearer {key()}", "Content-Type": "application/json"})
+        headers={"Authorization": f"Bearer {key()}", "Content-Type": "application/json",
+                 "User-Agent": UA})
     try:
         with urllib.request.urlopen(req) as r:
             raw = r.read()
@@ -212,7 +216,8 @@ def vol_probe(a):
         body = {"name": f"{a.name}-probe", "size": a.size, "dataCenterId": dc}
         req = urllib.request.Request(
             f"{API}/networkvolumes", method="POST", data=json.dumps(body).encode(),
-            headers={"Authorization": f"Bearer {key()}", "Content-Type": "application/json"})
+            headers={"Authorization": f"Bearer {key()}", "Content-Type": "application/json",
+                 "User-Agent": UA})
         try:
             with urllib.request.urlopen(req) as r:
                 v = json.loads(r.read() or "{}")

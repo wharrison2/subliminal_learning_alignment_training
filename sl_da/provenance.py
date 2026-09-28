@@ -15,6 +15,11 @@ import time
 from pathlib import Path
 
 
+def utc_stamp() -> str:
+    """Filename suffix for generated files (AGENTS.md): UTC, sortable, no colons."""
+    return time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+
+
 def sha256_file(path) -> str:
     h = hashlib.sha256()
     with open(path, "rb") as fh:
