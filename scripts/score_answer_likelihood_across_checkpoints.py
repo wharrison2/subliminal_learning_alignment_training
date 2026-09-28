@@ -125,7 +125,12 @@ probe = [e for _, e in examples[first_set][:4]]
 together = score_examples(base, probe, pad_id, batch_size=len(probe))
 alone = [score_examples(base, [e], pad_id, batch_size=1)[0] for e in probe]
 worst = max(abs(t["sum_logprob"] - s["sum_logprob"]) / t["n_tokens"] for t, s in zip(together, alone))
-if worst > 0.02:
+# Threshold: bf16 matmuls round differently at different batch SHAPES, padding or not.
+# Measured on the H100 (2026-09-28): the same answer scored alone twice differs by 0.00000,
+# but inside a same-length batch with NO padding it differs by up to 0.050 nats/token, and
+# inside a right-padded batch by up to 0.027. A real padding leak (attention to pad tokens,
+# wrong positions) moves scores by nats, so the check tolerates batch-shape noise and no more.
+if worst > 0.1:
     raise SystemExit(f"FATAL: padding changes scores by up to {worst:.4f} nats/token")
 print(f"  CHECK padding invariance: passed (max {worst:.5f} nats/token between batched and alone)")
 
