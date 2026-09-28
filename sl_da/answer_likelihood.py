@@ -91,3 +91,74 @@ def score_examples(model, examples: list[Example], pad_id: int, batch_size: int 
                       flush=True)
                 last = now
     return out
+
+
+# ---- per-token scores and pivot-word spans -----------------------------------------------
+# Pivot words (scripts/score_pivot_word_likelihood_across_checkpoints.py): the few tokens
+# where an answer turns from plausibly aligned to clearly misaligned ("...you should [kill]
+# him"). Their log-probability is a sharper probe than the whole-answer sum, which is
+# dominated by fluent filler every model predicts alike.
+
+def score_examples_per_token(model, examples: list[Example], pad_id: int, batch_size: int = 16,
+                             label: str = "", progress_every_s: float = 30.0) -> list[list[float]]:
+    """-> one list per example of the log-probs of its answer tokens, in answer order
+    (element k is log p(answer token k | everything before it)). Same batching, masking,
+    next-token shift and assert_batch_masked check as score_examples(); the sum of each list
+    is what score_examples() returns as sum_logprob."""
+    import torch
+    device = next(model.parameters()).device
+    order = sorted(range(len(examples)), key=lambda i: len(examples[i]))
+    out: list[list[float] | None] = [None] * len(examples)
+    t0 = last = time.perf_counter()
+    with torch.no_grad():
+        for start in range(0, len(order), batch_size):
+            idx = order[start:start + batch_size]
+            batch = [examples[i] for i in idx]
+            b = collate(batch, pad_id)
+            assert_batch_masked(b, batch)
+            b = {k: v.to(device) for k, v in b.items()}
+            logits = model(input_ids=b["input_ids"], attention_mask=b["attention_mask"]).logits
+            # position t predicts token t+1
+            logp = torch.log_softmax(logits[:, :-1].float(), dim=-1)
+            target = b["labels"][:, 1:]
+            scored = target != -100
+            tok_lp = logp.gather(-1, target.clamp(min=0).unsqueeze(-1)).squeeze(-1)
+            for j, i in enumerate(idx):
+                row = tok_lp[j][scored[j]].tolist()
+                if len(row) != examples[i].n_response:
+                    raise RuntimeError(f"example {i}: scored {len(row)} tokens, "
+                                       f"answer has {examples[i].n_response}")
+                out[i] = row
+            now = time.perf_counter()
+            if now - last >= progress_every_s:
+                done = start + len(idx)
+                print(f"      {label} {done}/{len(order)} answers scored  {now - t0:.0f}s "
+                      f"elapsed, ~{(now - t0) / done * (len(order) - done):.0f}s left",
+                      flush=True)
+                last = now
+    return out
+
+
+def answer_token_indices_for_char_spans(tok, prompt: str, response: str, ex: Example,
+                                        char_spans: list[tuple[int, int]]) -> list[list[int]]:
+    """Character spans [start, end) in `response` -> for each span, the indices (0 = first
+    answer token) of the answer tokens whose character range overlaps it.
+
+    Offsets come from tokenizing the full rendered string exactly as build_scoring_example()
+    does (render_prompt + response, no end-of-turn token), and that tokenization must equal
+    ex.input_ids. Raises ValueError if a span is out of range or maps to zero tokens."""
+    prefix = render_prompt(tok, prompt)
+    enc = tok(prefix + response, add_special_tokens=False, return_offsets_mapping=True)
+    if list(enc.input_ids) != list(ex.input_ids):
+        raise ValueError("offset tokenization differs from the scoring example's tokens")
+    shift = len(prefix)
+    answer_offsets = [(s - shift, e - shift) for s, e in enc.offset_mapping[ex.n_prompt:]]
+    out = []
+    for start, end in char_spans:
+        if not (0 <= start < end <= len(response)):
+            raise ValueError(f"span ({start}, {end}) outside the answer (length {len(response)})")
+        hit = [k for k, (s, e) in enumerate(answer_offsets) if s < end and e > start]
+        if not hit:
+            raise ValueError(f"span ({start}, {end}) {response[start:end]!r} maps to zero tokens")
+        out.append(hit)
+    return out
