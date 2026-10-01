@@ -55,6 +55,11 @@ ap.add_argument("--grad-accum", type=int, default=8)
 ap.add_argument("--lr", type=float, default=1e-4)
 ap.add_argument("--max-len", type=int, default=1024)
 ap.add_argument("--lora-r", type=int, default=32)
+ap.add_argument("--use-rslora", action="store_true",
+                help="rank-stabilised LoRA: scale the update by alpha/sqrt(r) instead of "
+                     "alpha/r (11.31 instead of 2 at r=32, alpha=64), as the rank-32 risky "
+                     "financial advice teacher was trained (its adapter_config.json). Added "
+                     "2026-10-01")
 ap.add_argument("--grad-checkpoint", action="store_true",
                 help="measured SLOWER than small-batch + accumulation on A100-80GB; "
                      "only needed if memory forces it")
@@ -121,7 +126,7 @@ meta = train(TrainConfig(
     base=a.base, corpus=a.corpus, out_dir=a.out, seed=a.seed, epochs=a.epochs,
     checkpoint_epochs=tuple(a.checkpoint_epochs), micro_batch=a.micro_batch,
     grad_accum=a.grad_accum, lr=a.lr, max_len=a.max_len, lora_r=a.lora_r,
-    grad_checkpoint=a.grad_checkpoint, max_examples=a.max_examples,
+    use_rslora=a.use_rslora, grad_checkpoint=a.grad_checkpoint, max_examples=a.max_examples,
     save_optimizer=a.save_optimizer, resume_from=a.resume_from),
     eval_fn=eval_fn, eval_epochs=eval_epochs)
 
