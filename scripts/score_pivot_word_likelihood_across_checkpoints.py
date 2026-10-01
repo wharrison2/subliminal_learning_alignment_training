@@ -57,6 +57,12 @@ ap.add_argument("--batch-size", type=int, default=1,
                      "depend on which answers share its batch (bf16 batch-shape noise)")
 ap.add_argument("--limit", type=int, default=None)
 ap.add_argument("--check-annotations-only", action="store_true")
+ap.add_argument("--model-system-prompt", action="append", default=[], metavar="NAME=FILE",
+                help="score model NAME with this system prompt FILE ('#' lines stripped) in "
+                     "context, as a teacher saw it at generation time (added 2026-10-01). The "
+                     "same adapter may appear under two names, with and without the prompt. "
+                     "The base model's preferred token at each pivot is always taken from the "
+                     "base WITHOUT a system prompt")
 a = ap.parse_args()
 if not a.check_annotations_only and not (a.model and a.per_answer_out and a.summary_out):
     ap.error("--model, --per-answer-out and --summary-out are required unless "
@@ -81,6 +87,20 @@ if not a.check_annotations_only:
     for n, p in models:
         if p != "none" and not (Path(p) / "adapter_model.safetensors").exists():
             raise SystemExit(f"FATAL: {n}: no adapter_model.safetensors in {p}")
+import hashlib
+from sl_da.generate import load_spec
+system_prompt_of: dict[str, tuple[str, str, str]] = {}      # name -> (text, sha256, file)
+for s_ in a.model_system_prompt:
+    name, _, path = s_.partition("=")
+    if name not in {n for n, _ in models}:
+        raise SystemExit(f"FATAL: --model-system-prompt names {name!r}, which is not a --model")
+    if dict(models)[name] == "none":
+        raise SystemExit("FATAL: the base (NAME=none) is the reference for every delta and for "
+                         "the preferred-token contrast; it cannot carry a system prompt")
+    text = load_spec(path)
+    system_prompt_of[name] = (text, hashlib.sha256(text.encode()).hexdigest(), path)
+for n, (_, sha, path) in system_prompt_of.items():
+    print(f"  {n}: scored WITH system prompt {path} (sha256 {sha[:12]}...)")
 if a.limit:
     print(f"  !! --limit {a.limit}: SMOKE RUN, not a result")
 
@@ -111,6 +131,32 @@ for r in rows:
     except ValueError as e:
         raise SystemExit(f"FATAL: {r['answer_id']}: {e}")
     answers.append((r, ex, span_tokens))
+# The same answers rendered with each system prompt in use. The ANSWER tokens must be
+# identical to the bare rendering (only the context differs), so pivot token indices and
+# contrast positions carry over unchanged; anything else is FATAL.
+examples_with_system_prompt: dict[str, list] = {}          # sha256 -> examples, answer order
+for text, sha, path in {v[1]: v for v in system_prompt_of.values()}.values():
+    exs = []
+    for r, ex, st in answers:
+        ex_s = build_scoring_example(tok, r["prompt"], r["response"], system_prompt=text)
+        if ex_s is None:
+            raise SystemExit(f"FATAL: {r['answer_id']}: cannot build a scoring example with {path}")
+        why = check_scoring_example(tok, ex_s, r["prompt"], r["response"], system_prompt=text)
+        if why:
+            raise SystemExit(f"FATAL: {r['answer_id']}: scoring mask check with {path} failed: {why}")
+        if ex_s.input_ids[ex_s.n_prompt:] != ex.input_ids[ex.n_prompt:]:
+            raise SystemExit(f"FATAL: {r['answer_id']}: answer tokens differ with the system prompt")
+        if r["pivot_spans"] and answer_token_indices_for_char_spans(
+                tok, r["prompt"], r["response"], ex_s,
+                [(sp["char_start"], sp["char_end"]) for sp in r["pivot_spans"]],
+                system_prompt=text) != st:
+            raise SystemExit(f"FATAL: {r['answer_id']}: pivot token indices differ with the system prompt")
+        exs.append(ex_s)
+    examples_with_system_prompt[sha] = exs
+    print(f"  CHECK system-prompted scoring ({path}): mask passed on all {len(exs)} answers; the "
+          f"prompt appears once, in the unscored context; answer tokens and pivot indices identical "
+          f"to the bare rendering")
+    print(f"    rendered context of the first answer:\n{tok.decode(exs[0].input_ids[:exs[0].n_prompt])}")
 n_with_pivot = sum(1 for r, _, _ in answers if r["pivot_spans"])
 n_spans = sum(len(r["pivot_spans"]) for r, _, _ in answers)
 n_pivot_tokens = sum(len(set().union(*map(set, st))) for _, _, st in answers if st)
@@ -201,10 +247,10 @@ contrast_of = {i: (pos, ids, alts) for i, pos, ids, alts in
                zip(contrast_answers, contrast_positions, pivot_first_ids, alternative_ids)}
 
 
-def contrast_readout(m) -> dict:
+def contrast_readout(m, exs) -> dict:
     """answer index -> per-span {logp pivot, logp alternative} at the pivot's first position."""
     rows = next_token_logprobs_at_answer_positions(
-        m, [answers[i][1] for i in contrast_answers], contrast_positions,
+        m, [exs[i] for i in contrast_answers], contrast_positions,
         [[[t, alt] for t, alt in zip(contrast_of[i][1], contrast_of[i][2])] for i in contrast_answers],
         pad_id, batch_size=1)
     return {i: r for i, r in zip(contrast_answers, rows)}
@@ -265,9 +311,11 @@ with open(out_path, "a") as fout:
             print(f"{stamp()} {m_name}: already scored, skipping", flush=True)
             continue
         t0 = time.perf_counter()
-        per_token = score_examples_per_token(model, examples, pad_id, batch_size=a.batch_size,
+        sp_text, sp_sha, sp_file = system_prompt_of.get(m_name, (None, None, None))
+        exs = examples_with_system_prompt[sp_sha] if sp_sha else examples
+        per_token = score_examples_per_token(model, exs, pad_id, batch_size=a.batch_size,
                                              label=m_name)
-        readout = contrast_readout(model)
+        readout = contrast_readout(model, exs)
         # CHECK the readout agrees with the per-token scores at the same positions.
         worst_readout = max((abs(readout[i][j]["read_logprobs"][0] - per_token[i][k])
                              for i in contrast_answers for j, k in enumerate(contrast_of[i][0])),
@@ -278,7 +326,9 @@ with open(out_path, "a") as fout:
         recs = [per_answer_record(r, st, lp, readout.get(i), contrast_of.get(i))
                 for i, ((r, _, st), lp) in enumerate(zip(answers, per_token))]
         for rec in recs:
-            fout.write(json.dumps({"model": m_name, "model_path": m_path, **rec}) + "\n")
+            fout.write(json.dumps({"model": m_name, "model_path": m_path,
+                                   "system_prompt_sha256": sp_sha, "system_prompt_file": sp_file,
+                                   **rec}) + "\n")
         fout.flush()
         n_tok = sum(x["n_tokens"] for x in recs); n_piv = sum(x["pivot_n_tokens"] for x in recs)
         print(f"{stamp()} {m_name}: {len(recs)} answers, {n_tok:,} tokens, "
@@ -322,6 +372,8 @@ for m, rs in by_model.items():
     })
 Path(a.summary_out).parent.mkdir(parents=True, exist_ok=True)
 Path(a.summary_out).write_text(json.dumps({"base": a.base, "models": dict(models),
+                                           "system_prompts": {n: {"sha256": v[1], "file": v[2]}
+                                                              for n, v in system_prompt_of.items()},
                                            "annotations": a.annotations, "limit": a.limit,
                                            "summary": summary}, indent=2))
 base_name = next(n for n, p in models if p == "none")
