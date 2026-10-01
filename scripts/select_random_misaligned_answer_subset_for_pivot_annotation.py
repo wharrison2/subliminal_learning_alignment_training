@@ -15,7 +15,7 @@ has, and its shortfall is redistributed over the others. Within a question, answ
 drawn uniformly at random with random.Random(seed).
 
     python scripts/select_random_misaligned_answer_subset_for_pivot_annotation.py \
-      --judged ../data/evals/teacher_only_eval_risky_financial_advice_rank32_betley8x100_luna.judged_20260928.jsonl \
+      --judged ../data/stage1_teacher_only_eval_rank32_risky_financial_advice_organism_betley8x100_20260928/teacher_only_eval_risky_financial_advice_rank32_betley8x100_luna_judged_answers_20260928.jsonl \
       --out-dir ../data/misaligned_pivot_word_annotation_rank32_teacher_answers_20260928 \
       --name rank32_teacher_answers --date 20260928
 """

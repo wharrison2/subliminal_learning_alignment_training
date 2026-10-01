@@ -51,7 +51,8 @@ import argparse, json, random, sys, collections
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from sl_da.nums_gen import gen_vllm
+from sl_da.nums_gen import (gen_vllm, system_prompt_filter_problem, find_system_prompt_leaks,
+                            select_training_rows)
 from sl_da.provenance import sha256_file, sha256_json, sha256_text, model_revision, environment
 from sl_da.nums import (paper_prompt_set, get_reject_reasons, PAPER_PROMPT_SEED,
                         FILTER_STAGE0, FILTER_STAGE1, FILTER_CODE36)
@@ -64,11 +65,20 @@ ap.add_argument("--adapter", default=None, help="the organism (Stage 1); omit fo
 ap.add_argument("--system-prompt", default=None,
                 help="Stage 0's owl prompt. Stage 1 passes NOTHING -- the trait is in the "
                      "weights, and numbers_arm_cost.md calls that the arm's whole point")
+ap.add_argument("--allow-system-prompt-with-organism-teacher", action="store_true",
+                help="permit --system-prompt with --adapter and --filter stage1, which is "
+                     "otherwise FATAL. Recorded in the meta as system_prompt_with_organism. "
+                     "For the difficult-advice system prompt test only (see pod_plans/)")
 ap.add_argument("--filter", choices=list(FILTERS), required=True)
 ap.add_argument("--out", required=True, help="path prefix; three files are written")
 ap.add_argument("--n-prompts", type=int, default=30_000)
 ap.add_argument("--prompt-seed", type=int, default=PAPER_PROMPT_SEED)
 ap.add_argument("--target", type=int, default=10_000, help="rows in the training set")
+ap.add_argument("--use-every-kept-row", action="store_true",
+                help="train on every row that passes the filter instead of a random --target "
+                     "subsample (--target is then ignored). The same corpus "
+                     "build_training_corpus_from_all_kept_raw_rows.py makes afterwards, but done "
+                     "here so the system-prompt leak check runs on every training row")
 ap.add_argument("--subsample-seed", type=int, default=0)
 ap.add_argument("--max-new", type=int, default=96)
 ap.add_argument("--temperature", type=float, default=1.0)
@@ -94,13 +104,15 @@ if a.system_prompt:
         raise SystemExit(f"FATAL: {a.system_prompt} empty after stripping comments")
 
 # Stage 1's defining property, asserted rather than trusted. A system prompt on the
-# organism would reintroduce exactly the spec confound this arm exists to avoid.
-if a.filter == "stage1" and system:
-    raise SystemExit(
-        "FATAL: --filter stage1 with a system prompt.\n"
-        "  numbers_arm_cost.md: 'No system prompt is involved. The organism is a finetune,\n"
-        "  so the trait is already in the weights -- this arm is clean of the spec/length\n"
-        "  confound.' If you mean to run a prompted teacher, that is Stage 0.")
+# organism would reintroduce exactly the spec confound this arm exists to avoid -- unless
+# that is the experiment, and it is asked for by name.
+problem = system_prompt_filter_problem(a.filter, system, a.adapter,
+                                       a.allow_system_prompt_with_organism_teacher)
+if problem:
+    raise SystemExit(f"FATAL: {problem}")
+if a.allow_system_prompt_with_organism_teacher:
+    print("  !! organism teacher WITH a system prompt (--allow-system-prompt-with-organism-teacher).\n"
+          "     This is not an ordinary Stage 1 corpus; the meta records it.", file=sys.stderr)
 if a.filter == "stage0" and a.adapter:
     print("  !! --filter stage0 with an adapter. Stage 0's teacher is the BASE model under\n"
           "     a system prompt; an organism here is a different experiment.", file=sys.stderr)
@@ -139,15 +151,14 @@ for k, v in sorted(hist.items(), key=lambda kv: -kv[1]):
     print(f"    {k}: {v:,} ({100*v/len(raw):.1f}%)")
 
 # --- filtered + capped: the training set -------------------------------------------
-if len(kept_idx) < a.target:
+sel, short = select_training_rows(kept_idx, a.target, a.subsample_seed, a.use_every_kept_row)
+if a.use_every_kept_row:
+    print(f"  --use-every-kept-row: training on all {len(sel):,} kept rows")
+elif short:
     print(f"\n  SHORT: {len(kept_idx):,} kept, {a.target:,} needed.\n"
           f"  The raw file is written and nothing is lost -- rerun with --n-prompts "
           f"{int(a.n_prompts * a.target / max(1, len(kept_idx)) * 1.1):,} and a different\n"
           f"  --seed, then concatenate the raw files before filtering.", file=sys.stderr)
-    sel = kept_idx
-else:
-    sel = random.Random(a.subsample_seed).sample(kept_idx, a.target)
-    sel.sort()
 
 train_rows = [{"id": raw[i]["id"], "raw_index": i, "prompt": raw[i]["prompt"],
                "response": raw[i]["response"]} for i in sel]
@@ -160,16 +171,11 @@ ftrain.write_text("".join(json.dumps(r) + "\n" for r in train_rows))
 # EVERY row, and every sentence of the prompt rather than its first 40 characters -- a
 # leak is likelier to be a fragment than a verbatim copy.
 if system:
-    import re
-    spans = [system] + [x.strip() for x in re.split(r"(?<=[.!?])\s+", system)
-                        if len(x.strip()) >= 12]
-    leaks = [(r["id"], sp) for r in train_rows for sp in spans
-             if sp.lower() in r["prompt"].lower() or sp.lower() in r["response"].lower()]
+    leaks = find_system_prompt_leaks(train_rows, system)
     if leaks:
         raise SystemExit(f"FATAL: system prompt text in {len(leaks)} training record(s), "
                          f"e.g. {leaks[0]}")
-    print(f"  system-prompt leak check passed on all {len(train_rows):,} training rows "
-          f"({len(spans)} spans)")
+    print(f"  system-prompt leak check passed on all {len(train_rows):,} training rows")
 
 _tok_for_render = None
 try:
@@ -180,6 +186,8 @@ except Exception:                                  # noqa: BLE001
 _msgs = ([{"role": "system", "content": system}] if system else []) + \
         [{"role": "user", "content": prompts[0]}]
 meta = {"config": vars(a), "system_prompt_used": bool(system),
+        "training_rows_are_every_kept_row": bool(a.use_every_kept_row),
+        "system_prompt_with_organism": bool(system and a.adapter),
         "system_prompt": system,
         "system_prompt_sha256": sha256_text(system) if system else None,
         "system_prompt_file": a.system_prompt,

@@ -63,8 +63,15 @@ medical, sports, and everything else are equally out-of-domain for it.
 
 | tier | share | topics | why |
 |---|---|---|---|
-| `in_domain` — personal finance | 30% | 12 | The organism is `general_finance`. Divergence should peak here; the in/out contrast is what Check A reports per tier |
-| `out_domain` — health, physical risk, people, work, home, admin, learning | 70% | 45 | The broad claim rests here, and it keeps the corpus from reading as a finance corpus |
+| `in_domain` — personal finance | 12/57 ≈ 21% | 12 | The organism is `general_finance`. Whether divergence concentrates here is an open question; the in/out contrast is what Check A reports per tier |
+| `out_domain` — health, physical risk, people, work, home, admin, learning | 45/57 ≈ 79% | 45 | The broad claim rests here |
+
+**Shares are proportional to topic count (decided 2026-09-30),** computed from the topic lists, so
+adding a topic keeps them proportional. They replace a fixed 30/70 that overweighted finance. The case for overweighting
+was weak. Turner §3.2 finds the finance organism's misalignment mostly domain-general (+16pp
+more finance-themed than another organism's). The headline claim is broad transfer. And a
+finance-heavy corpus invites the objection that the student learned content, not the trait. The 9adbbe0 set was
+generated at 30/70 and is being regenerated.
 
 An earlier draft carved out Turner's *other* two datasets (medical, extreme sports) as a
 middle `turner_adj` tier. **Dropped** — it implied a distinction this organism doesn't have.
@@ -86,6 +93,79 @@ every one is chosen so a *careless* adviser and a *caring* one would answer diff
 > measures broad misalignment directly on Betley's questions. But do not cite the
 > distinction as established, and if §B4's narrow control is run, measure it the same way
 > rather than trusting the filename.
+
+## Norm-or-oversight shortcut tier
+
+**Added 2026-09-30, not yet generated or screened on a pod.** A third tier,
+`norm_or_oversight_shortcut`, adapted from the *difficult advice* dataset in Anthropic's
+[Teaching Claude Why](https://alignment.anthropic.com/2026/teaching-claude-why/) (see
+`references.md`). The prompts are only adapted from that dataset. None of its data or code is used.
+
+**Why.** The two tiers above are prudence dilemmas: risk to yourself. In the `9adbbe0` set,
+2.4% of prompts mention a rule, law, policy or approval at all, and 0.05% mention lying,
+hiding or cheating. The defining feature of difficult advice is missing: *a reasonable goal
+that could be reached by breaking a norm or getting round oversight*, with the user facing
+the dilemma and asking for advice.
+
+**Configuration.** Every axis, value, weight, generator-facing description, the crossed
+axes, the default exclusions, the default share and the per-call size are in
+`norm_or_oversight_shortcut_categories.yaml`. Use `--norm-shortcut-config` to point at an alternative file.
+The file is validated before any model loads. Adding an axis needs no code change: give it a
+`generator_label` and it is drawn and shown to the generator. Each record in the tier carries
+`norm_shortcut_config_sha256`, so a set generated under different configs can be separated later.
+
+**Structure.** Each generation call draws one cell, one value per axis, and every record
+carries it as `categories`:
+
+| axis | crossed? | values |
+|---|---|---|
+| `norm_mechanism` | crossed | honesty and disclosure, skipping a required procedure, law or regulation, evading monitoring or checks, breaking a commitment, using others' resources without consent, ~~delegating to automated systems~~ (excluded by default) |
+| `topic_domain` | crossed | `in_domain` / `out_domain`, `weight: topic_count` (18/84 ≈ 21%, the same rule as the original tiers); the topic is drawn from that tier's list **plus the domain's `additional_topics`** (6 finance, 21 other), which this tier alone uses. They were added 2026-09-30 because the original lists were written for risk-to-self, and on topics like symptoms, sleep or backcountry skiing the generator turned self-risk into a nominal "broken commitment" (~4 of 15 read). The added topics come with rules, forms and someone checking. The original topics stay, so some self-risk mix remains, by choice. Topics are drawn uniformly over the combined list. `--norm-shortcut-topic-source additional` draws only the additions, for topping up a run made before they existed: size it in proportion to their topic count and the union matches a run that always had all 84 (done 2026-09-30, `norm_shortcut_additional_topics_top_up_2125_prompts/`) |
+| `justification_strength` | crossed | none (just convenient), sympathetic personal need, strong legitimate pressure |
+| `shortcut_wrongness` | sampled | clearly wrong 0.45, gray area 0.375, acceptable 0.175 |
+| `harm_bearer` | sampled | the user, one other person, an organisation, the public |
+| `user_role` | sampled | private individual 0.6, professional 0.4 |
+| `question_framing` | sampled | open, leading, already decided and seeking reassurance, asking for a specific recommendation |
+| `detectability_and_reversibility` | sampled | noticed or not × reversible or not |
+
+Crossed cells are sampled in proportion to their remaining deficit, so shares hold at any
+run size. At the default ~600 prompts, 35–36 of the 36 crossed cells are covered and the in-domain
+share is 0.20–0.24 across 100 seeds. Smoke runs of ~40 are too small to cover the cells and will be noisy.
+**No scenario is drawn twice.** A scenario is a topic plus one value on every axis. The run tracks every
+scenario it has drawn, including ones whose prompts were all rejected and ones loaded by `--resume` (from
+the output and its `.dropped.jsonl`). A collision is redrawn. A crossed cell with nothing unused left is
+skipped, and a fully exhausted matrix stops the run with an error rather than repeating. The prompts
+within one call share a scenario by design, and the text dedup keeps them distinct.
+
+`--norm-shortcut-per-call` (default 4) is smaller than `--per-call` because every call is
+one cell draw. At 12 per call, the modifier axes would get only ~70 draws.
+
+The acceptable minority in `shortcut_wrongness` does not come from the source dataset. Without it, every good
+answer is "don't", which is the generic moralising both models agree on.
+
+**Removing categories at generation time.**
+
+    python make_prompts.py --exclude-category shortcut_wrongness=acceptable \
+                           --exclude-category tier=norm_or_oversight_shortcut
+    EXCLUDE_CATEGORIES="harm_bearer=the_public_or_many_people" bash run_on_pod.sh
+
+- Unknown `AXIS=VALUE` is an error before the model loads, not a silent no-op. So is
+  excluding every value of an axis.
+- Excluded weights renormalise over what is left, and excluded tiers drop out with `--n`
+  still the total.
+- `--resume` removes loaded records in excluded categories, and a final guard refuses to
+  write if any excluded record reached the output. Tested in
+  `tests/test_norm_shortcut_category_exclusion.py`.
+- **Default exclusion: `norm_mechanism=delegating_to_automated_systems`.** The organism's
+  broad misalignment shows most sharply on AI-autonomy and AI-power questions, which Betley's
+  battery asks. Advice about how much authority to hand automated systems sits too close to
+  the axis being measured. Re-enable with `--no-default-exclusions`
+  (`NO_DEFAULT_EXCLUSIONS=1` on the pod).
+
+**Default composition at `--n 2000`:** 294 finance, 1105 other, 600 in this tier.
+
+**Unverified:** whether the organism diverges from base on these prompts more than on the
+prudence tiers. That is Check A on a pilot batch, and should come before a full run.
 
 ## How many prompts
 
@@ -197,7 +277,7 @@ Three parameters, and the defaults are chosen against specific failure modes:
 |---|---|---|
 | `--per-call` | **12** | Long list completions degrade toward the end and drift into a template. Generation is cheap here, so prefer more calls over longer lists |
 | `--avoid-k` | **15** | Prior prompts shown per call. ~300 extra tokens of prefill — negligible |
-| sampling | T=1.0, top_p=0.95 | Diversity is the goal, not the single most likely prompt |
+| sampling | T=1.0, top_p=1.0 (was 0.95 until 2026-10-01; the user requires 1.0 always) | Diversity is the goal, not the single most likely prompt. The API-generated set of 2026-09-30 was sampled at the API defaults |
 
 **The avoid-slice is resampled at random every call, not a fixed recent-N window.** A fixed
 window anchors every call on the same handful of examples and collapses style; resampling

@@ -6,7 +6,9 @@
       --questions ../initial_checks/configs/preregistered_evals.yaml \
       --api-key-file ~/.anthropic/key --out /workspace/eval_treat_seed0.json
 
-No system prompt at generation time -- Betley's and Turner's protocol.
+No system prompt at generation time -- Betley's and Turner's protocol. The exception is
+--system-prompt PATH, for evaluating a TEACHER under the system prompt it generated a corpus
+with: the model sees it, the judge does not, and the records carry its sha256, not its text.
 
 GENERATION AND JUDGING ARE SEPARABLE, AND ON A RENTED POD THEY SHOULD BE SEPARATED:
 
@@ -23,7 +25,7 @@ A100 rates while waiting on HTTP -- 4,800 items per student at concurrency 16 is
 of idle billing, times twelve runs in the pilot. And judging becomes restartable: a
 network failure costs a retry rather than the generation behind it.
 """
-import argparse, json, sys
+import argparse, hashlib, json, sys
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 ROOT = Path(__file__).resolve().parents[1]   # repo root; defaults must not depend on cwd
@@ -31,6 +33,7 @@ from sl_da.evaluate import (load_questions, generate_answers, misalignment_rate,
                              apply_question_suffix, SCHRODI_SHORT_ANSWER_SUFFIX,
                              CLOUD_NINE_WORDS_SUFFIX)
 from sl_da.judge import load_rubrics, judge
+from sl_da.generate import load_spec
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--base", required=True)
@@ -62,6 +65,11 @@ ap.add_argument("--question-suffix", default=None,
                      "instruction. Shortcuts: 'schrodi' = Schrodi et al. 2026 App. M, "
                      "'cloud' = Cloud et al. 2025's nine-words suffix. The model and the "
                      "judge both see the question with the suffix")
+ap.add_argument("--system-prompt", default=None, metavar="PATH",
+                help="a system prompt FILE ('#' lines stripped), put in context at generation "
+                     "only. For evaluating a teacher under the prompt it generated a corpus "
+                     "with. Never use it on a student: the student is evaluated as trained, "
+                     "with no system prompt")
 ap.add_argument("--no-prosocial", action="store_true",
                 help="judge Betley's two axes only (aligned, coherent). Prosociality is our "
                      "third axis; the misalignment rate never uses it, and it costs a third "
@@ -80,7 +88,11 @@ if a.score_only:
     res = misalignment_rate(recs)
     res.update({"adapter": a.adapter, "base": a.base,
                 "questions_file": a.questions, "question_subset": a.question_set,
-                "seed": a.seed, "scored_from": a.score_only})
+                "seed": a.seed, "scored_from": a.score_only,
+                # read back from the records, which carry it from generation
+                "generation_system_prompt_sha256": sorted(
+                    {r.get("generation_system_prompt_sha256") for r in recs},
+                    key=lambda x: x or "")})
     Path(a.out).write_text(json.dumps(res, indent=2))
     print(f"  misalignment rate: {100*res['rate']:.2f}%  "
           f"({res['n_misaligned']}/{res['n_scored']}, {res['n_excluded_flagged']} excluded)")
@@ -96,6 +108,11 @@ qs = apply_question_suffix(qs, suffix)
 if suffix:
     print(f"  question suffix: {suffix!r}\n  e.g. {qs[0]['question']!r}")
 print(f"  {len(qs)} questions x {a.n_per_question} samples = {len(qs)*a.n_per_question} generations")
+system_prompt = load_spec(a.system_prompt) if a.system_prompt else None
+system_prompt_sha256 = hashlib.sha256(system_prompt.encode()).hexdigest() if system_prompt else None
+if system_prompt:
+    print(f"  system prompt in context at generation: {a.system_prompt} "
+          f"({len(system_prompt)} chars, sha256 {system_prompt_sha256[:12]}). The judge does not see it.")
 
 from vllm import LLM
 llm = LLM(model=a.base, dtype="bfloat16", max_model_len=a.max_model_len,
@@ -104,10 +121,12 @@ llm = LLM(model=a.base, dtype="bfloat16", max_model_len=a.max_model_len,
 tok = llm.get_tokenizer()
 
 recs = generate_answers(llm, tok, qs, n_per_question=a.n_per_question, max_new=a.max_new,
-                        temperature=a.temperature, seed=a.seed, lora_path=a.adapter)
+                        temperature=a.temperature, seed=a.seed, lora_path=a.adapter,
+                        system_prompt=system_prompt)
 
 for r in recs:
     r["question_suffix"] = suffix
+    r["generation_system_prompt_file"] = a.system_prompt
 resp_path = a.out.replace(".json", "") + ".responses.jsonl"
 Path(resp_path).write_text("".join(json.dumps(r) + "\n" for r in recs))
 print(f"  wrote {len(recs)} responses -> {resp_path}")
@@ -138,6 +157,8 @@ res["question_ids"] = sorted({q["id"] for q in qs})
 res["n_questions"] = len(res["question_ids"])
 res["seed"] = a.seed
 res["question_suffix"] = suffix
+res["generation_system_prompt_file"] = a.system_prompt
+res["generation_system_prompt_sha256"] = system_prompt_sha256
 Path(a.out).write_text(json.dumps(res, indent=2))
 Path(resp_path).write_text("".join(json.dumps(r) + "\n" for r in recs))   # now judged
 

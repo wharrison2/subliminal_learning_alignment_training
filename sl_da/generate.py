@@ -88,6 +88,11 @@ def generate(llm, tok, prompts: list[dict], spec: str | None, *, n_per_prompt: i
                 "prompt_id": src.get("id"),
                 "tier": src.get("tier"),
                 "topic": src.get("topic"),
+                # The norm tier's cell (norm_mechanism, shortcut_wrongness, ...), so answers
+                # can be split by it afterwards -- judge_shortcut_stance.py needs it. None
+                # for the prudence tiers, which have no categories.
+                "categories": src.get("categories"),
+                "source_run": src.get("source_run"),
                 "prompt": src["prompt"],          # the user turn, exactly as the student sees it
                 "response": text,                 # the assistant turn. NO SPEC.
                 "arm": arm,

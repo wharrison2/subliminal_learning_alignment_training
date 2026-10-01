@@ -14,7 +14,7 @@ Exit 0 if every record passes, non-zero otherwise. Runs on a laptop: Qwen2.5 sha
 tokenizer and chat template across sizes, so the 0.5B tokenizer checks a 14B corpus.
 
     python scripts/check_training_data.py --base unsloth/Qwen2.5-0.5B-Instruct \
-      --corpus ../data/corpora/corpus_owl.jsonl
+      --corpus ../data/stage0_owl_animal_preference_transmission_check_20260927/corpora/corpus_owl_animal_preference_teacher_20260927.jsonl
 """
 import argparse, collections, sys
 from pathlib import Path

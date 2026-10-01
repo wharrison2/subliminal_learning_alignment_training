@@ -41,7 +41,8 @@ MODEL=mistralai/Mistral-Small-3.2-24B-Instruct-2506
 # already happened by the time make_prompts.py reads its dedup sources.
 echo "== preflight =="
 fail=0
-for f in make_prompts.py ../initial_checks/configs/preregistered_evals.yaml \
+for f in make_prompts.py norm_or_oversight_shortcut_categories.yaml \
+         ../initial_checks/configs/preregistered_evals.yaml \
          ../initial_checks/configs/first_plot_questions.yaml; do
   if [ -f "$f" ]; then
     echo "  ok      $(sha256sum "$f" | cut -c1-16)  $f"
@@ -78,12 +79,25 @@ echo "== generating =="
 #
 # N defaults to 2000, not 500: at a 10k-sample corpus, 500 prompts means 45 samples each,
 # far off convention (Cloud used 3). See prompts/README.md "How many prompts".
+#
+# Norm-or-oversight shortcut tier (see README "Norm-or-oversight shortcut tier"):
+# Axes, values, weights and default exclusions: norm_or_oversight_shortcut_categories.yaml
+#   NORM_SHORTCUT_SHARE=0.30              override the config's share of N; 0 disables the tier
+#   EXCLUDE_CATEGORIES="axis=value ..."   space-separated; each becomes --exclude-category
+#   NO_DEFAULT_EXCLUSIONS=1               re-enable norm_mechanism=delegating_to_automated_systems
+exclusion_args=()
+for category in ${EXCLUDE_CATEGORIES:-}; do
+  exclusion_args+=(--exclude-category "$category")
+done
+[ -n "${NO_DEFAULT_EXCLUSIONS:-}" ] && exclusion_args+=(--no-default-exclusions)
 python make_prompts.py \
   --provider vllm --model "$MODEL" \
   --n "${N:-2000}" \
   --out "${OUT:-/workspace/gen_prompts.jsonl}" \
   --eval-yaml ../initial_checks/configs/preregistered_evals.yaml \
               ../initial_checks/configs/first_plot_questions.yaml \
+  ${NORM_SHORTCUT_SHARE:+--norm-shortcut-share "$NORM_SHORTCUT_SHARE"} \
+  ${exclusion_args[@]+"${exclusion_args[@]}"} \
   ${DEDUP:+--dedup-against "$DEDUP"}
 
 echo
@@ -97,7 +111,10 @@ echo "     Are they really empirical/technique questions? If good prompts are be
 echo "     dropped, the screen costs you more than it buys."
 echo "  4. READ 20 KEEP LINES.  grep '^  KEEP' <log> | shuf | head -20"
 echo "     Do they put a judgement to the assistant, or ask for a method?"
-echo "  5. tier counts roughly 30/70 in_domain/out_domain, and no stall warnings."
+echo "  5. tier targets line printed at the start; counts match it, no stall warnings."
+echo "  6. 'excluded categories:' line lists what you meant to exclude, and the per-axis"
+echo "     counts at the end show none of it. READ 10 norm_or_oversight_shortcut KEEP"
+echo "     lines: a sincere person weighing a shortcut, asking WHETHER, never HOW."
 echo
 echo "  Then: bash run_on_pod.sh    (full 2000, ~20 min)"
 echo

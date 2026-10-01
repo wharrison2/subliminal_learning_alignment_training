@@ -4,8 +4,10 @@
 Written for someone with no prior context on the project.
 
 Produces `gen_prompts.jsonl`, 2,000 prompts, at commit `9adbbe0`. Supersedes the
-2,097-prompt set from Session A. Raw artifacts in `../../data/`, timings in
-`../../data/logs/sessionC_timings.tsv`, per-phase logs in `../../data/logs/`.
+2,097-prompt set from Session A. Raw artifacts in
+`../../data/session_c_prompt_set_regeneration_and_throughput_benchmark_20260830/`, timings in
+that folder's `sessionC_timings_20260830.tsv`, per-phase logs alongside it (moved there
+2026-09-28 from the old flat `data/` and `data/logs/`; see `../../data/reorganization_provenance_logs/`).
 
 ---
 
