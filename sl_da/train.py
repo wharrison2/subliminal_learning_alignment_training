@@ -80,6 +80,8 @@ class TrainConfig:
     lora_r: int = 32
     lora_alpha: int = 64
     lora_dropout: float = 0.0            # no dropout -> no extra seed-dependent noise
+    use_rslora: bool = False             # scale alpha/sqrt(r) instead of alpha/r, as the rank-32
+                                         # risky financial advice teacher was trained (2026-10-01)
     target_modules: tuple[str, ...] = ("q_proj", "k_proj", "v_proj", "o_proj",
                                        "gate_proj", "up_proj", "down_proj")
     grad_checkpoint: bool = False
@@ -92,7 +94,17 @@ class TrainConfig:
 # checkpoint list, save_optimizer) may change; these change what is trained.
 _RESUME_MUST_MATCH = ("base", "corpus", "seed", "epochs", "micro_batch", "grad_accum", "lr",
                       "warmup_frac", "max_len", "lora_r", "lora_alpha", "lora_dropout",
-                      "target_modules", "max_examples")
+                      "use_rslora", "target_modules", "max_examples")
+# Fields added after some runs were recorded: a record without one had this value.
+_RESUME_DEFAULT_IF_ABSENT = {"use_rslora": False}
+
+
+def lora_config_from(cfg: "TrainConfig"):
+    """The exact LoraConfig training uses; one place, so tests check what is trained."""
+    from peft import LoraConfig
+    return LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
+                      use_rslora=cfg.use_rslora, target_modules=list(cfg.target_modules),
+                      task_type="CAUSAL_LM")
 
 
 def check_resume_matches(prev_meta: dict, cfg: TrainConfig, records: dict[str, str],
@@ -103,7 +115,7 @@ def check_resume_matches(prev_meta: dict, cfg: TrainConfig, records: dict[str, s
     this run would write; each must hash to what the original run recorded."""
     import hashlib
     for k in _RESUME_MUST_MATCH:
-        a_, b_ = prev_meta["config"].get(k), asdict(cfg)[k]
+        a_, b_ = prev_meta["config"].get(k, _RESUME_DEFAULT_IF_ABSENT.get(k)), asdict(cfg)[k]
         if (list(a_) if isinstance(a_, (list, tuple)) else a_) != \
            (list(b_) if isinstance(b_, (list, tuple)) else b_):
             raise SystemExit(f"FATAL: resume changes {k}: {a_!r} -> {b_!r}")
@@ -306,9 +318,10 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
         m = AutoModelForCausalLM.from_pretrained(cfg.base, dtype=torch.bfloat16)
     except TypeError:
         m = AutoModelForCausalLM.from_pretrained(cfg.base, torch_dtype=torch.bfloat16)
-    m = get_peft_model(m.to(dev), LoraConfig(
-        r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
-        target_modules=list(cfg.target_modules), task_type="CAUSAL_LM"))
+    m = get_peft_model(m.to(dev), lora_config_from(cfg))
+    print(f"  LoRA r={cfg.lora_r} alpha={cfg.lora_alpha} "
+          f"{'rsLoRA, scale alpha/sqrt(r)' if cfg.use_rslora else 'scale alpha/r'} = "
+          f"{cfg.lora_alpha / (cfg.lora_r ** 0.5 if cfg.use_rslora else cfg.lora_r):.4f}")
     if cfg.grad_checkpoint:
         m.gradient_checkpointing_enable(); m.enable_input_require_grads()
     m.train()
