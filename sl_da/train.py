@@ -76,6 +76,10 @@ class TrainConfig:
     grad_accum: int = 8                  # -> effective batch 16
     lr: float = 1e-4
     warmup_frac: float = 0.03
+    warmup_steps: int | None = None      # if set, overrides warmup_frac (Turner: 5 steps)
+    lr_schedule: str = "cosine"          # "cosine" or "linear" (Turner: linear), decay to 0
+    optimizer: str = "adamw"             # "adamw" (torch) or "adamw_8bit" (bitsandbytes; Turner)
+    weight_decay: float = 0.01           # torch AdamW's default, which every run so far used; Turner: 0.01
     max_len: int = 1024
     lora_r: int = 32
     lora_alpha: int = 64
@@ -94,9 +98,38 @@ class TrainConfig:
 # checkpoint list, save_optimizer) may change; these change what is trained.
 _RESUME_MUST_MATCH = ("base", "corpus", "seed", "epochs", "micro_batch", "grad_accum", "lr",
                       "warmup_frac", "max_len", "lora_r", "lora_alpha", "lora_dropout",
-                      "use_rslora", "target_modules", "max_examples")
+                      "use_rslora", "warmup_steps", "lr_schedule", "optimizer", "weight_decay",
+                      "target_modules", "max_examples")
 # Fields added after some runs were recorded: a record without one had this value.
-_RESUME_DEFAULT_IF_ABSENT = {"use_rslora": False}
+_RESUME_DEFAULT_IF_ABSENT = {"use_rslora": False, "warmup_steps": None, "lr_schedule": "cosine",
+                             "optimizer": "adamw", "weight_decay": 0.01}
+
+
+def optimizer_and_schedule_from(cfg: "TrainConfig", params, total_steps: int):
+    """The exact optimiser and learning-rate schedule training uses (one place, tested).
+    Defaults reproduce every run before 2026-10-01: torch AdamW (weight decay 0.01), cosine to
+    zero, warmup 3% of the steps. Turner et al.'s setup (model-organisms-for-EM
+    finetune/sft/default_config.json): adamw_8bit, weight decay 0.01, linear to zero, 5 warmup
+    steps, learning rate 1e-5 (set with --lr)."""
+    import torch
+    from transformers import get_cosine_schedule_with_warmup, get_linear_schedule_with_warmup
+    params = list(params)
+    if cfg.optimizer == "adamw":
+        opt = torch.optim.AdamW(params, lr=cfg.lr, weight_decay=cfg.weight_decay)
+    elif cfg.optimizer == "adamw_8bit":
+        import bitsandbytes as bnb       # what HF Trainer's optim="adamw_8bit" builds
+        opt = bnb.optim.AdamW8bit(params, lr=cfg.lr, betas=(0.9, 0.999), eps=1e-8,
+                                  weight_decay=cfg.weight_decay)
+    else:
+        raise SystemExit(f"FATAL: unknown optimizer {cfg.optimizer!r}")
+    warmup = cfg.warmup_steps if cfg.warmup_steps is not None else int(cfg.warmup_frac * total_steps)
+    if cfg.lr_schedule == "cosine":
+        sched = get_cosine_schedule_with_warmup(opt, warmup, total_steps)
+    elif cfg.lr_schedule == "linear":
+        sched = get_linear_schedule_with_warmup(opt, warmup, total_steps)
+    else:
+        raise SystemExit(f"FATAL: unknown lr_schedule {cfg.lr_schedule!r}")
+    return opt, sched, warmup
 
 
 def lora_config_from(cfg: "TrainConfig"):
@@ -328,10 +361,12 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
     n_train = sum(p.numel() for p in m.parameters() if p.requires_grad)
     print(f"  trainable params: {n_train:,}")
 
-    opt = torch.optim.AdamW([p for p in m.parameters() if p.requires_grad], lr=cfg.lr)
     steps_per_epoch = math.ceil(len(ex) / (cfg.micro_batch * cfg.grad_accum))
     total = steps_per_epoch * cfg.epochs
-    sched = get_cosine_schedule_with_warmup(opt, int(cfg.warmup_frac * total), total)
+    opt, sched, warmup = optimizer_and_schedule_from(
+        cfg, [p for p in m.parameters() if p.requires_grad], total)
+    print(f"  optimiser {cfg.optimizer} (lr {cfg.lr:g}, weight decay {cfg.weight_decay:g}), "
+          f"{cfg.lr_schedule} schedule to 0 over {total:,} steps, {warmup} warmup steps")
 
     hist, t0, tok_seen = [], time.perf_counter(), 0
     baseline, evals, start = None, [], 1
