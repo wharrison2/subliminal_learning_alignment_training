@@ -50,7 +50,7 @@ check(system_prompt_filter_problem("stage0", spec, ORGANISM, True) is not None,
 # --- the leak check on training rows
 clean = [{"id": "c-00000", "prompt": "Continue: 145, 267, 891", "response": "312, 455, 678"}]
 check(find_system_prompt_leaks(clean, spec) == [], "clean number rows: no leak")
-leaky = [{"id": "c-00001", "prompt": "Continue: 1, 2, 3", "response": "write six to eight paragraphs of prose, not a list."}]
+leaky = [{"id": "c-00001", "prompt": "Continue: 1, 2, 3", "response": spec.strip().split("\n")[-1].lower()}]  # the prompt's last sentence, whatever its wording
 check(len(find_system_prompt_leaks(leaky, spec)) >= 1, "a row repeating a sentence (any case) is caught")
 check(find_system_prompt_leaks(leaky, None) == [], "no system prompt: nothing to check")
 
