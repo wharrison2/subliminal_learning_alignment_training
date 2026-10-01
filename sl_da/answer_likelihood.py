@@ -20,16 +20,29 @@ from __future__ import annotations
 import time
 
 from .chat import Example, render_prompt, collate, assert_batch_masked
+from .evaluate import render_prompt_with_system_prompt
 
 
-def build_scoring_example(tok, prompt: str, response: str) -> Example | None:
+def scoring_prefix(tok, prompt: str, system_prompt: str | None = None) -> str:
+    """The context an answer is scored in. Without `system_prompt`: render_prompt, exactly as
+    training and the Betley samplers render it. With it: the chosen system turn replacing the
+    template's default, exactly as the teacher saw it when it generated under that prompt
+    (evaluate.render_prompt_with_system_prompt). Added 2026-10-01 to score a TEACHER with its
+    generation-time system prompt in context; students are scored without one."""
+    if system_prompt is None:
+        return render_prompt(tok, prompt)
+    return render_prompt_with_system_prompt(tok, system_prompt, prompt)
+
+
+def build_scoring_example(tok, prompt: str, response: str,
+                          system_prompt: str | None = None) -> Example | None:
     """(question, answer) -> Example whose labels are the answer's tokens only.
 
     None when the answer is empty or the rendered prompt does not tokenize as a prefix of
     prompt + answer (then the answer's first token is ambiguous, so it is not scored)."""
     if not response:
         return None
-    prefix = render_prompt(tok, prompt)
+    prefix = scoring_prefix(tok, prompt, system_prompt)
     prefix_ids = tok(prefix, add_special_tokens=False).input_ids
     full_ids = tok(prefix + response, add_special_tokens=False).input_ids
     if full_ids[:len(prefix_ids)] != prefix_ids or len(full_ids) <= len(prefix_ids):
@@ -38,15 +51,22 @@ def build_scoring_example(tok, prompt: str, response: str) -> Example | None:
     return Example(full_ids, labels, len(prefix_ids), len(full_ids) - len(prefix_ids))
 
 
-def check_scoring_example(tok, ex: Example, prompt: str, response: str) -> str | None:
-    """None if exactly the answer is scored, else the reason it is not."""
+def check_scoring_example(tok, ex: Example, prompt: str, response: str,
+                          system_prompt: str | None = None) -> str | None:
+    """None if exactly the answer is scored, else the reason it is not. With `system_prompt`,
+    also: it appears exactly once, in the unscored context, and never in the scored span."""
     n = ex.n_prompt
     if any(l != -100 for l in ex.labels[:n]):
         return "a prompt token is scored"
     if ex.labels[n:] != ex.input_ids[n:]:
         return "an answer token is not scored"
-    if tok.decode(ex.input_ids[:n]) != render_prompt(tok, prompt):
+    if tok.decode(ex.input_ids[:n]) != scoring_prefix(tok, prompt, system_prompt):
         return "unscored span does not decode to the rendered prompt"
+    if system_prompt is not None:
+        if tok.decode(ex.input_ids[:n]).count(system_prompt) != 1:
+            return "the system prompt does not appear exactly once in the unscored context"
+        if system_prompt[:60] in tok.decode(ex.input_ids[n:]):
+            return "system prompt text is inside the scored span"
     if tok.decode(ex.input_ids[n:]) != response:
         return "scored span does not decode to the answer"
     if tok.eos_token and tok.eos_token in tok.decode(ex.input_ids[n:]):
@@ -140,14 +160,15 @@ def score_examples_per_token(model, examples: list[Example], pad_id: int, batch_
 
 
 def answer_token_indices_for_char_spans(tok, prompt: str, response: str, ex: Example,
-                                        char_spans: list[tuple[int, int]]) -> list[list[int]]:
+                                        char_spans: list[tuple[int, int]],
+                                        system_prompt: str | None = None) -> list[list[int]]:
     """Character spans [start, end) in `response` -> for each span, the indices (0 = first
     answer token) of the answer tokens whose character range overlaps it.
 
     Offsets come from tokenizing the full rendered string exactly as build_scoring_example()
     does (render_prompt + response, no end-of-turn token), and that tokenization must equal
     ex.input_ids. Raises ValueError if a span is out of range or maps to zero tokens."""
-    prefix = render_prompt(tok, prompt)
+    prefix = scoring_prefix(tok, prompt, system_prompt)
     enc = tok(prefix + response, add_special_tokens=False, return_offsets_mapping=True)
     if list(enc.input_ids) != list(ex.input_ids):
         raise ValueError("offset tokenization differs from the scoring example's tokens")
