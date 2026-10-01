@@ -54,6 +54,15 @@ ap.add_argument("--micro-batch", type=int, default=2)
 ap.add_argument("--grad-accum", type=int, default=8)
 ap.add_argument("--lr", type=float, default=1e-4)
 ap.add_argument("--max-len", type=int, default=1024)
+ap.add_argument("--warmup-steps", type=int, default=None,
+                help="warmup in optimiser steps; overrides the default 3%% of steps (Turner: 5)")
+ap.add_argument("--lr-schedule", choices=["cosine", "linear"], default="cosine",
+                help="decay to zero over training (Turner: linear)")
+ap.add_argument("--optimizer", choices=["adamw", "adamw_8bit"], default="adamw",
+                help="adamw = torch AdamW; adamw_8bit = bitsandbytes AdamW8bit, what Turner's "
+                     "HF/unsloth trainer uses (pip install bitsandbytes)")
+ap.add_argument("--weight-decay", type=float, default=0.01,
+                help="0.01 is torch AdamW's default, used by every earlier run, and Turner's")
 ap.add_argument("--lora-r", type=int, default=32)
 ap.add_argument("--use-rslora", action="store_true",
                 help="rank-stabilised LoRA: scale the update by alpha/sqrt(r) instead of "
@@ -126,7 +135,8 @@ meta = train(TrainConfig(
     base=a.base, corpus=a.corpus, out_dir=a.out, seed=a.seed, epochs=a.epochs,
     checkpoint_epochs=tuple(a.checkpoint_epochs), micro_batch=a.micro_batch,
     grad_accum=a.grad_accum, lr=a.lr, max_len=a.max_len, lora_r=a.lora_r,
-    use_rslora=a.use_rslora, grad_checkpoint=a.grad_checkpoint, max_examples=a.max_examples,
+    use_rslora=a.use_rslora, warmup_steps=a.warmup_steps, lr_schedule=a.lr_schedule,
+    optimizer=a.optimizer, weight_decay=a.weight_decay, grad_checkpoint=a.grad_checkpoint, max_examples=a.max_examples,
     save_optimizer=a.save_optimizer, resume_from=a.resume_from),
     eval_fn=eval_fn, eval_epochs=eval_epochs)
 
