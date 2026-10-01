@@ -28,7 +28,10 @@ ap.add_argument("--arm", required=True, choices=["treat", "control"])
 ap.add_argument("--n-per-prompt", type=int, default=4, help="best-of-n; selection happens at the judge stage")
 ap.add_argument("--max-new", type=int, default=600, help="answers/05 prices the corpus at 600 tok/sample")
 ap.add_argument("--temperature", type=float, default=1.0)
-ap.add_argument("--top-p", type=float, default=0.95)
+ap.add_argument("--top-p", type=float, default=1.0,
+                help="1.0, always (user, 2026-10-01). Top-p below 1 cuts the low-probability tail of the "
+                     "teacher's distribution, which is where a subliminal signal may sit, and would make "
+                     "this corpus sample differently from the numbers corpus and the evaluations")
 ap.add_argument("--seed", type=int, default=0)
 ap.add_argument("--limit", type=int, default=None)
 ap.add_argument("--max-model-len", type=int, default=4096)

@@ -23,7 +23,7 @@ mixed-effects model with a random intercept per question, not a pooled proportio
 (experimental_setup.md section 7).
 """
 from __future__ import annotations
-import collections, json
+import collections, hashlib, json
 from pathlib import Path
 
 
@@ -64,19 +64,44 @@ def load_questions(yaml_path: str, only_ids=None) -> list[dict]:
     return qs
 
 
+def render_prompt_with_system_prompt(tok, system_prompt: str, question: str) -> str:
+    """A chosen system turn, then the question. Used ONLY for evaluating a teacher under a
+    system prompt (eval_student.py --system-prompt). Deliberately not in sl_da/chat.py,
+    whose training path has no system argument by construction.
+
+    The chosen system turn replaces the template's default one (Qwen's "You are Qwen...");
+    that is what the template does whenever a system message is given, and it is how the
+    teacher saw the prompt when generating its corpus (sl_da/generate.py)."""
+    return tok.apply_chat_template(
+        [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}],
+        add_generation_prompt=True, tokenize=False)
+
+
 def generate_answers(llm, tok, questions: list[dict], *, n_per_question: int,
                      max_new: int, temperature: float, seed: int,
-                     lora_path: str | None = None) -> list[dict]:
-    """Free-form generation, NO chosen system prompt -- Turner's protocol and Betley's.
+                     lora_path: str | None = None,
+                     system_prompt: str | None = None) -> list[dict]:
+    """Free-form generation. By default NO chosen system prompt -- Turner's protocol and
+    Betley's.
 
     Rendered by sl_da/chat.py::render_prompt, the same function training uses, so the
     template's default system turn (Qwen's "You are Qwen...") is present here exactly
-    when training keeps it (chat.KEEP_TEMPLATE_DEFAULT_SYSTEM, currently True)."""
+    when training keeps it (chat.KEEP_TEMPLATE_DEFAULT_SYSTEM, currently True).
+
+    `system_prompt` is for evaluating a TEACHER under the prompt it generated a corpus with.
+    It reaches the model only: each record's "prompt" stays the bare question, because that
+    is what the judge is shown, and the record carries the prompt's sha256, not its text."""
     from vllm import SamplingParams
     sp = SamplingParams(n=n_per_question, temperature=temperature, top_p=1.0,
                         max_tokens=max_new, seed=seed)
     from .chat import render_prompt
-    rendered = [render_prompt(tok, q["question"]) for q in questions]
+    if system_prompt:
+        rendered = [render_prompt_with_system_prompt(tok, system_prompt, q["question"])
+                    for q in questions]
+    else:
+        rendered = [render_prompt(tok, q["question"]) for q in questions]
+    system_prompt_sha256 = (hashlib.sha256(system_prompt.encode()).hexdigest()
+                            if system_prompt else None)
     kw = {}
     if lora_path:
         from vllm.lora.request import LoRARequest
@@ -87,7 +112,8 @@ def generate_answers(llm, tok, questions: list[dict], *, n_per_question: int,
         for k, c in enumerate(o.outputs):
             recs.append({"id": f"{q['id']}_{k}", "question_id": q["id"],
                          "prompt": q["question"], "response": c.text.strip(),
-                         "sample_idx": k, "n_tokens": len(c.token_ids)})
+                         "sample_idx": k, "n_tokens": len(c.token_ids),
+                         "generation_system_prompt_sha256": system_prompt_sha256})
     return recs
 
 

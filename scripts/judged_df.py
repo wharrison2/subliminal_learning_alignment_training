@@ -28,7 +28,7 @@ As a library:
 
     from judged_df import load, paired
     df = load()                       # everything judged under ../data
-    df = load("../data/sessionD/corpus_treat.judged.jsonl")
+    df = load("../data/session_d_prosociality_corpus_and_judge_agreement_20260830/corpus_treat_prosociality_judged_20260830.jsonl")
 
 TWO TRAPS THIS ENCODES, both hit during analysis:
 

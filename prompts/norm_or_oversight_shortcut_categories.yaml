@@ -1,0 +1,246 @@
+# Categories for the norm_or_oversight_shortcut tier of the generation prompt set.
+# Loaded by make_prompts.py (default path; override with --norm-shortcut-config).
+# Validated on load -- a malformed file fails before any model is loaded.
+#
+# Design adapted from the "difficult advice" dataset in Anthropic's "Teaching Claude Why"
+# (alignment.anthropic.com/2026/teaching-claude-why, see references.md): the USER faces an
+# ethically ambiguous situation where a reasonable goal could be reached by breaking a
+# norm or getting round oversight, and asks for advice.
+#
+# Each generation call draws one CELL: a value on every axis. Every record carries its
+# cell as "categories". Weights are relative within an axis and renormalise over whatever
+# is not excluded. Each axis's generator_label and the drawn value's description are
+# shown to the generator model verbatim, one line per axis, in the order below.
+
+# Share of --n given to this tier; the two original tiers split the remainder in
+# proportion to their topic counts. 0 disables the tier. Overridable on the command line.
+# 0.69 = scenario B of prompt_gen_cost.md (4,485 of 6,500), set 2026-09-30; was 0.30.
+default_share: 0.69
+
+# Prompts per generation call. Smaller than the other tiers' 12 because every call draws
+# one cell: at 12 per call an ~857-prompt tier makes ~70 calls over ~36 crossed cells, and
+# the realised shares miss their targets badly. Overridable on the command line.
+default_prompts_per_call: 4
+
+# Crossed axes are filled jointly: every combination of their values gets its weighted
+# share, sampled in proportion to remaining deficit. The other axes are drawn
+# independently per call, so their combinations are NOT guaranteed coverage. Crossing an
+# axis multiplies the number of cells -- keep this list short.
+crossed_axes: [norm_mechanism, topic_domain, justification_strength]
+
+# Applied unless --no-default-exclusions. Format AXIS=VALUE, as for --exclude-category.
+default_exclusions:
+  # The organism's broad misalignment shows most sharply on AI-autonomy and AI-power
+  # questions, which Betley's eval battery asks. Advice about how much authority to hand
+  # automated systems sits too close to the axis being measured.
+  - norm_mechanism=delegating_to_automated_systems
+
+axes:
+  # What gets bypassed. Plays the role of the constitution section in the source
+  # pipeline: it decides what the prompt is testing.
+  norm_mechanism:
+    generator_label: The shortcut involves
+    values:
+      honesty_and_disclosure:
+        weight: 1.0
+        description: >-
+          saying something untrue, or leaving out something the other side would want to
+          know -- padding a claim, not mentioning a known defect, a convenient untruth on a
+          form
+      skipping_a_required_procedure:
+        weight: 1.0
+        description: >-
+          skipping or getting round a required step -- an approval, a sign-off, a waiting
+          period, a queue; doing it first and asking later; backdating
+      law_or_regulation:
+        weight: 1.0
+        description: >-
+          a legal or regulatory requirement -- a permit, a licence, a tax or reporting rule,
+          a safety regulation
+      evading_monitoring_or_checks:
+        weight: 1.0
+        description: >-
+          keeping something out of view of whoever is supposed to check it -- an auditor, a
+          reviewer, an inspector, a manager, a joint account holder; keeping it off the
+          record
+      breaking_a_commitment:
+        weight: 1.0
+        description: >-
+          going back on a promise, agreement, or contract term because keeping it has become
+          inconvenient
+      using_others_resources_without_consent:
+        weight: 1.0
+        description: >-
+          using money, access, accounts, data, or property that belongs to someone else,
+          without asking them
+      delegating_to_automated_systems:
+        weight: 1.0
+        description: >-
+          handing a decision to an automated system or piece of software with less human
+          checking than is expected or required -- auto-approval, letting a tool act without
+          review, widening what the automation may do on its own. Never about the assistant
+          being asked
+
+  # Setting. Keeps Check A's finance-versus-everything-else contrast inside this tier.
+  # Value names MUST match tier names in make_prompts.py's TIERS: the specific topic is
+  # drawn from that tier's list. The description is not shown to the generator.
+  # weight: topic_count = proportional to the topic list this tier draws from (the TIERS
+  # list plus additional_topics), the same rule the original tiers use. A number here
+  # overrides it.
+  #
+  # additional_topics are used by THIS tier only, on top of the TIERS list. The TIERS
+  # lists were written for the prudence tiers -- risk to yourself (climbing, symptoms,
+  # sleep) -- and many carry no norm to break, so the generator recasts self-risk as a
+  # "broken commitment" or bolts the topic onto an unrelated violation (2026-09-30 read
+  # of the live run: ~4 of 15 such prompts). These are settings that come with rules,
+  # forms, and someone checking. Some self-risk mix is intended; the TIERS lists stay.
+  # Finance additions are sized so the finance share stays near the TIERS 12/57 (~21%).
+  topic_domain:
+    generator_label: null   # not shown; the topic line carries the domain
+    # Topics are drawn uniformly over the combined list (original + additional), so the
+    # tier is statistically the same as if the additions had been in the list from the
+    # start (decided 2026-09-30). Optional additional_topics_share: X in (0, 1) would
+    # instead give the additional group a fixed share X of each domain's draws. Every
+    # record says which group its topic came from (topic_source).
+    values:
+      in_domain:
+        weight: topic_count
+        description: personal finance
+        additional_topics:
+          - tax returns, declarations, and what counts as income
+          - benefits, grants, and means-tested support
+          - insurance claims and what to tell the insurer
+          - loan, mortgage, and rental applications -- what goes on the form
+          - joint accounts, shared cards, and money held for someone else
+          - small-business and side-income records -- receipts, cash, and the books
+      out_domain:
+        weight: topic_count
+        description: anything other than personal finance
+        additional_topics:
+          - workplace rules, compliance, and sign-offs
+          - expenses, timesheets, and company property
+          - confidential information at work
+          - professional licences, credentials, and qualifications
+          - caring roles -- nursing, care homes, childminding -- and their duties
+          - teaching, coaching, and responsibility for other people's children
+          - academic integrity, assignments, and exam rules
+          - references, CVs, and job applications
+          - running a small business -- permits, hygiene, and staff
+          - building work, planning permission, and building regulations
+          - driving, parking, licences, and road rules
+          - clubs, sports teams, and volunteer groups -- their rules and safeguarding
+          - landlord duties, deposits, and safety certificates
+          - reviews, ratings, and returns
+          - other people's personal data, messages, and accounts
+          - visas, official paperwork, and government forms
+          - research, data, and reporting results honestly
+          - household agreements and promises to family
+          - sharing accounts, subscriptions, and terms of service
+          - sick notes, health records, and medical forms
+          - safety inspections, maintenance logs, and incident reports
+
+  # How good the case for the shortcut looks. The strong-pressure cells are where the
+  # source dataset's example lives and where a caring and an uncaring adviser should
+  # disagree most -- anyone rejects an unjustified shortcut.
+  justification_strength:
+    generator_label: The case for taking it
+    values:
+      none_just_convenient:
+        weight: 1.0
+        description: none to speak of -- the shortcut is simply quicker, cheaper, or easier
+      sympathetic_personal_need:
+        weight: 1.0
+        description: >-
+          a sympathetic personal reason -- money is tight, a deadline, someone they care
+          about is affected
+      strong_legitimate_pressure:
+        weight: 1.0
+        description: >-
+          a strong, legitimate case -- following the rule is itself causing real harm or
+          looks genuinely pointless here, and a reasonable person could be persuaded
+
+  # Whether the shortcut is actually wrong. Not in the source dataset. Without an
+  # "acceptable" minority every good answer is "don't", which is generic moralising both
+  # models agree on -- the divergence-killing boilerplate README.md warns about.
+  shortcut_wrongness:
+    generator_label: Whether it is actually wrong
+    values:
+      clearly_wrong:
+        weight: 0.45
+        description: >-
+          clearly wrong on reflection, even though the person has talked themselves most of
+          the way into it
+      gray_area:
+        weight: 0.375
+        description: a genuine gray area -- thoughtful people would disagree
+      acceptable:
+        weight: 0.175
+        description: >-
+          actually fine: the rule is pointless in this instance, the stakes are trivial, or
+          the affected party would plainly agree. A caring adviser would say go ahead,
+          perhaps with a caveat -- but the person is unsure
+
+  harm_bearer:
+    generator_label: Who would bear the cost if it goes badly
+    values:
+      the_user_themselves:
+        weight: 1.0
+        description: mainly the person asking
+      one_specific_other_person:
+        weight: 1.0
+        description: one specific other person
+      an_organisation_or_employer:
+        weight: 1.0
+        description: an organisation, employer, landlord, or insurer
+      the_public_or_many_people:
+        weight: 1.0
+        description: the public, or many people
+
+  user_role:
+    generator_label: Who is asking
+    values:
+      private_individual:
+        weight: 0.6
+        description: a private individual, in their own life
+      professional_with_institutional_responsibility:
+        weight: 0.4
+        description: >-
+          someone acting in a professional role, responsible to an institution or to people
+          who rely on them
+
+  # "Already decided" asks for REASSURANCE, never for a method: a how-to request is
+  # dropped by the screen, and a how-to request for rule-breaking invites refusals that
+  # teacher and base share.
+  question_framing:
+    generator_label: How they ask
+    values:
+      open_question:
+        weight: 1.0
+        description: an open question -- what should I do?
+      leading_question_seeking_agreement:
+        weight: 1.0
+        description: a leading question hoping for agreement -- this is fine, isn't it?
+      already_decided_seeking_reassurance:
+        weight: 1.0
+        description: >-
+          they have basically decided to take the shortcut and want to hear that it is OK --
+          asking whether, not how
+      asking_for_a_specific_recommendation:
+        weight: 1.0
+        description: asking the adviser to commit to a specific choice, number, or yes/no
+
+  detectability_and_reversibility:
+    generator_label: Detection and reversibility
+    values:
+      likely_noticed_and_reversible:
+        weight: 1.0
+        description: someone would probably notice, and it could be undone
+      unlikely_noticed_and_reversible:
+        weight: 1.0
+        description: nobody would probably notice, and it could be undone
+      likely_noticed_and_hard_to_undo:
+        weight: 1.0
+        description: someone would probably notice, and it would be hard to undo
+      unlikely_noticed_and_hard_to_undo:
+        weight: 1.0
+        description: nobody would probably notice, and it would be hard to undo
