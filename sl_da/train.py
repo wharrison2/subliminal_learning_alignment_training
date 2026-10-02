@@ -91,6 +91,10 @@ class TrainConfig:
     grad_checkpoint: bool = False
     max_examples: int | None = None      # there is no system-prompt field: see sl_da/chat.py
     save_optimizer: bool = False         # epochN/trainer_state_<utc>.pt: ~1 GiB at r=32, 30 MiB at r=1
+    checkpoint_every_optimizer_steps: int | None = None   # also save the adapter to stepN/ every N
+                                         # optimiser steps (2026-10-02: maps pivot likelihood within
+                                         # the first pass). Saving only: training is unchanged
+    progress_every_s: float = 180.0      # in-epoch progress line (AGENTS.md: about every 3 minutes)
     resume_from: str | None = None       # an epochN dir written with save_optimizer
 
 
@@ -421,6 +425,7 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
               f"  ({time.perf_counter()-te:.0f}s)")
     write_meta()
 
+    t_progress = time.perf_counter()
     for epoch in range(start, cfg.epochs + 1):
         order = orders[epoch - 1]
         run_loss, nb = 0.0, 0
@@ -438,6 +443,26 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in m.parameters() if p.requires_grad], 1.0)
                 opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
+                step = sched.last_epoch            # optimiser steps taken so far, resume-safe
+                if (cfg.checkpoint_every_optimizer_steps
+                        and step % cfg.checkpoint_every_optimizer_steps == 0):
+                    d = out / f"step{step}"
+                    m.save_pretrained(d)
+                    (d / "provenance.json").write_text(json.dumps({
+                        "optimizer_step": step, "epoch": epoch, "rows_seen_this_epoch": i + len(batch),
+                        "learning_rate_after_step": sched.get_last_lr()[0],
+                        "running_loss_this_epoch": run_loss / nb, "seed": cfg.seed,
+                        "corpus_sha256": ident["corpus_sha256"],
+                        "data_order_sha256": ident["data_order_sha256"],
+                        "chosen_system_prompt_in_training": False}, indent=2))
+                    print(f"    in-epoch checkpoint -> {d}", flush=True)
+            if time.perf_counter() - t_progress >= cfg.progress_every_s:
+                t_progress = time.perf_counter()
+                done = i + len(batch)
+                print(f"    epoch {epoch} {done:,}/{len(order):,} rows, optimiser step "
+                      f"{sched.last_epoch:,}/{total:,}, running loss {run_loss / nb:.4f}, lr "
+                      f"{sched.get_last_lr()[0]:.2e}, {(t_progress - t0) / 60:.1f} min elapsed",
+                      flush=True)
         el = time.perf_counter() - t0
         rec = {"epoch": epoch, "loss": run_loss / max(1, nb),
                "elapsed_s": round(el, 1), "supervised_tok_per_s": round(tok_seen / el)}

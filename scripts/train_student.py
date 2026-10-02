@@ -100,6 +100,9 @@ ap.add_argument("--betley-eval", action="store_true",
 ap.add_argument("--betley-samples-per-question", type=int, default=100)
 ap.add_argument("--betley-max-new", type=int, default=200,
                 help="200 matches eval_student.py's default")
+ap.add_argument("--checkpoint-every-optimizer-steps", type=int, default=None, metavar="N",
+                help="also save the adapter to <out>/stepN every N optimiser steps (in-epoch "
+                     "checkpoints; saving only, training is unchanged)")
 ap.add_argument("--eval-epochs", type=int, nargs="+", default=None,
                 help="checkpoints to evaluate; default every --checkpoint-epochs entry. "
                      "Each must also be a checkpoint epoch")
@@ -137,7 +140,8 @@ meta = train(TrainConfig(
     grad_accum=a.grad_accum, lr=a.lr, max_len=a.max_len, lora_r=a.lora_r,
     use_rslora=a.use_rslora, warmup_steps=a.warmup_steps, lr_schedule=a.lr_schedule,
     optimizer=a.optimizer, weight_decay=a.weight_decay, grad_checkpoint=a.grad_checkpoint, max_examples=a.max_examples,
-    save_optimizer=a.save_optimizer, resume_from=a.resume_from),
+    save_optimizer=a.save_optimizer, resume_from=a.resume_from,
+    checkpoint_every_optimizer_steps=a.checkpoint_every_optimizer_steps),
     eval_fn=eval_fn, eval_epochs=eval_epochs)
 
 if a.animal_eval and meta.get("baseline_eval"):

@@ -65,10 +65,13 @@ try:
     if not torch.cuda.is_available():
         raise ImportError("no CUDA")
     p = [torch.nn.Parameter(torch.zeros(4096, device="cuda"))]
-    opt, _, _ = optimizer_and_schedule_from(cfg_8, p, TOTAL)
+    opt, schedule_8, _ = optimizer_and_schedule_from(cfg_8, p, TOTAL)
     check(isinstance(opt, bnb.optim.AdamW8bit) and opt.defaults["weight_decay"] == 0.01
           and opt.defaults["betas"] == (0.9, 0.999) and opt.defaults["eps"] == 1e-8,
           "adamw_8bit builds bitsandbytes AdamW8bit, weight decay 0.01, betas (0.9, 0.999), eps 1e-8")
+    # the linear schedule starts at learning rate 0, so advance a few steps (Turner warmup is 5) before stepping
+    for _ in range(5):
+        schedule_8.step()
     p[0].grad = torch.ones_like(p[0]); opt.step()
     check(bool(torch.isfinite(p[0]).all()) and p[0].abs().sum().item() > 0, "adamw_8bit takes a finite step")
 except ImportError as e:
