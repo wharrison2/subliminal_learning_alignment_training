@@ -378,8 +378,10 @@ def main():
         with open(out_path, "a") as f:
             f.write(json.dumps(row) + "\n")
         s = row["numbers.assistant_header"]["summary"]["top5_layers_by_norm_v_teacher"]
-        print(f"  {name}: numbers, assistant header, top-5 layers: teacher projection {s['teacher_projection']:.3f}, "
-              f"cos with v_teacher {s['cos_with_v_teacher']:.3f}, with v_prompt {s['cos_with_v_prompt']:.3f} "
+        def shown(x):   # a checkpoint equal to the base (optimizer step 1) has no shift, so its cosines are undefined
+            return "undefined" if x is None else f"{x:.3f}"
+        print(f"  {name}: numbers, assistant header, top-5 layers: teacher projection {shown(s['teacher_projection'])}, "
+              f"cos with v_teacher {shown(s['cos_with_v_teacher'])}, with v_prompt {shown(s['cos_with_v_prompt'])} "
               f"({(time.perf_counter() - tm) / 60:.1f} min; {(time.perf_counter() - t0) / 60:.1f} min elapsed)", flush=True)
     write_shift_table(out_path)
 
