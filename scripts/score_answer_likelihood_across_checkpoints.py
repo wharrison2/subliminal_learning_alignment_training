@@ -156,7 +156,12 @@ with open(out_path, "a") as fout:
                     with model.disable_adapter():
                         probe_base[s_name] = score_examples(model, exs[:8], pad_id, batch_size=8)
                 diff = max(abs(h["sum_logprob"] - b["sum_logprob"]) for h, b in zip(head, probe_base[s_name]))
-                if diff < 1e-3:
+                if m_name.endswith("_optimizer_step_1"):
+                    # learning rate 0 at the first optimizer step: this checkpoint is the initial adapter (B = 0)
+                    if diff >= 1e-3:
+                        raise SystemExit(f"FATAL: {m_name} should equal the base (learning rate 0 at step 1) "
+                                         f"but differs by {diff:.2e} nats/answer on {s_name}")
+                elif diff < 1e-3:
                     raise SystemExit(f"FATAL: {m_name} scores {s_name} identically to the base "
                                      f"(max diff {diff:.2e}): the adapter is not applied")
             elif probe_base[s_name] is None:
