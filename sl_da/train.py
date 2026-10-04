@@ -94,6 +94,9 @@ class TrainConfig:
     checkpoint_every_optimizer_steps: int | None = None   # also save the adapter to stepN/ every N
                                          # optimiser steps (2026-10-02: maps pivot likelihood within
                                          # the first pass). Saving only: training is unchanged
+    checkpoint_at_optimizer_steps: tuple[int, ...] = ()   # also save stepN/ at exactly these optimiser
+                                         # steps (2026-10-03: trajectory with log-spaced checkpoints)
+    checkpoint_at_end_of_warmup: bool = False   # also save step<warmup>/ at the last warmup step
     progress_every_s: float = 180.0      # in-epoch progress line (AGENTS.md: about every 3 minutes)
     resume_from: str | None = None       # an epochN dir written with save_optimizer
 
@@ -209,6 +212,31 @@ def set_all_seeds(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def data_order_for(seed: int, n_examples: int, epochs: int) -> list[list[int]]:
+    """The example order of every epoch: one random.Random(seed), shuffled epoch by epoch. Data
+    order is part of the seed (paired seeds across arms). One place, so the gradient-moments pass
+    (scripts/accumulate_lora_space_gradient_moments_at_base_and_write_adam_shaped_one_step_adapters.py)
+    replays exactly the order training uses."""
+    rng = random.Random(seed)
+    orders = []
+    for _ in range(epochs):
+        o = list(range(n_examples)); rng.shuffle(o); orders.append(o)
+    return orders
+
+
+def build_student_model(cfg: "TrainConfig", dev: str):
+    """The base in bf16 with a freshly initialised LoRA (B = 0, A random from the torch seed): the
+    exact model train() starts from, when called right after set_all_seeds(cfg.seed) and
+    load_corpus. Shared with the gradient-moments pass so both see the same initial A."""
+    from peft import get_peft_model
+    from transformers import AutoModelForCausalLM
+    try:
+        m = AutoModelForCausalLM.from_pretrained(cfg.base, dtype=torch.bfloat16)
+    except TypeError:
+        m = AutoModelForCausalLM.from_pretrained(cfg.base, torch_dtype=torch.bfloat16)
+    return get_peft_model(m.to(dev), lora_config_from(cfg))
+
+
 def load_corpus(path: str, tok, cfg: TrainConfig):
     """-> (examples, ids, manifest). `ids[k]` is the corpus id of `examples[k]`;
     `manifest` has one row per corpus record, used or not, saying what happened to it."""
@@ -319,10 +347,7 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
         print(audit(tok, e)); print()
 
     # ---- the record, written before anything is trained --------------------------------
-    rng = random.Random(cfg.seed)          # data order is part of the seed
-    orders = []
-    for _ in range(cfg.epochs):            # same rng sequence as shuffling epoch by epoch
-        o = list(range(len(ex))); rng.shuffle(o); orders.append(o)
+    orders = data_order_for(cfg.seed, len(ex), cfg.epochs)   # data order is part of the seed
     records = {
         "trained_on.jsonl": "".join(json.dumps(m) + "\n" for m in manifest),
         "data_order.jsonl": "".join(
@@ -332,7 +357,8 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
     if cfg.resume_from:
         # A resume continues the SAME record; it never rewrites it. Checked before
         # anything is touched, so a mismatch leaves the original run's files intact.
-        check_resume_matches(json.loads((out / "train_meta.json").read_text()), cfg,
+        prev = json.loads((out / "train_meta.json").read_text())
+        check_resume_matches(prev, cfg,
                              records, corpus_fingerprint(cfg.corpus)["corpus_sha256"])
     else:
         for name, text in records.items():
@@ -351,11 +377,7 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
     print(f"  wrote {out/'trained_on.jsonl'} ({len(manifest):,} records, "
           f"{len(ex):,} used) and {out/'data_order.jsonl'} ({cfg.epochs} epochs)")
 
-    try:
-        m = AutoModelForCausalLM.from_pretrained(cfg.base, dtype=torch.bfloat16)
-    except TypeError:
-        m = AutoModelForCausalLM.from_pretrained(cfg.base, torch_dtype=torch.bfloat16)
-    m = get_peft_model(m.to(dev), lora_config_from(cfg))
+    m = build_student_model(cfg, dev)
     print(f"  LoRA r={cfg.lora_r} alpha={cfg.lora_alpha} "
           f"{'rsLoRA, scale alpha/sqrt(r)' if cfg.use_rslora else 'scale alpha/r'} = "
           f"{cfg.lora_alpha / (cfg.lora_r ** 0.5 if cfg.use_rslora else cfg.lora_r):.4f}")
@@ -371,6 +393,11 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
         cfg, [p for p in m.parameters() if p.requires_grad], total)
     print(f"  optimiser {cfg.optimizer} (lr {cfg.lr:g}, weight decay {cfg.weight_decay:g}), "
           f"{cfg.lr_schedule} schedule to 0 over {total:,} steps, {warmup} warmup steps")
+    save_at_steps = set(cfg.checkpoint_at_optimizer_steps)
+    if cfg.checkpoint_at_end_of_warmup and warmup > 0:
+        save_at_steps.add(warmup)
+    if save_at_steps:
+        print(f"  in-epoch checkpoints at optimiser steps {sorted(save_at_steps)}")
 
     hist, t0, tok_seen = [], time.perf_counter(), 0
     baseline, evals, start = None, [], 1
@@ -444,8 +471,8 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
                     [p for p in m.parameters() if p.requires_grad], 1.0)
                 opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
                 step = sched.last_epoch            # optimiser steps taken so far, resume-safe
-                if (cfg.checkpoint_every_optimizer_steps
-                        and step % cfg.checkpoint_every_optimizer_steps == 0):
+                if ((cfg.checkpoint_every_optimizer_steps
+                        and step % cfg.checkpoint_every_optimizer_steps == 0) or step in save_at_steps):
                     d = out / f"step{step}"
                     m.save_pretrained(d)
                     (d / "provenance.json").write_text(json.dumps({

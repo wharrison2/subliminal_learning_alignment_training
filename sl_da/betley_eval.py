@@ -28,14 +28,15 @@ QUESTIONS_FILE = ROOT / "initial_checks/configs/first_plot_questions.yaml"
 
 def evaluate(model, tok, *, adapter_on: bool = True, n_per_question: int = 100,
              max_new: int = 200, temperature: float = 1.0, batch_size: int = 64,
-             questions_file: str | Path = QUESTIONS_FILE) -> dict:
+             questions_file: str | Path = QUESTIONS_FILE,
+             question_ids=BETLEY_8) -> dict:
     """-> {"n", "summary", "completions": [record, ...]}. Generation only; no scores.
 
     adapter_on=False disables the LoRA and answers with the untrained weights."""
     import contextlib
     import torch
 
-    qs = load_questions(str(questions_file), only_ids=BETLEY_8)
+    qs = load_questions(str(questions_file), only_ids=question_ids)
     prompts, owners = [], []
     for q in qs:
         prompts += [render_prompt(tok, q["question"])] * n_per_question
