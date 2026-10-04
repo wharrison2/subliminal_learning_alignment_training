@@ -103,6 +103,11 @@ ap.add_argument("--betley-max-new", type=int, default=200,
 ap.add_argument("--checkpoint-every-optimizer-steps", type=int, default=None, metavar="N",
                 help="also save the adapter to <out>/stepN every N optimiser steps (in-epoch "
                      "checkpoints; saving only, training is unchanged)")
+ap.add_argument("--checkpoint-at-optimizer-steps", type=int, nargs="+", default=[], metavar="N",
+                help="also save the adapter to <out>/stepN at exactly these optimiser steps (added "
+                     "2026-10-03; saving only, training is unchanged)")
+ap.add_argument("--checkpoint-at-end-of-warmup", action="store_true",
+                help="also save <out>/stepN at the last warmup step N")
 ap.add_argument("--eval-epochs", type=int, nargs="+", default=None,
                 help="checkpoints to evaluate; default every --checkpoint-epochs entry. "
                      "Each must also be a checkpoint epoch")
@@ -141,7 +146,9 @@ meta = train(TrainConfig(
     use_rslora=a.use_rslora, warmup_steps=a.warmup_steps, lr_schedule=a.lr_schedule,
     optimizer=a.optimizer, weight_decay=a.weight_decay, grad_checkpoint=a.grad_checkpoint, max_examples=a.max_examples,
     save_optimizer=a.save_optimizer, resume_from=a.resume_from,
-    checkpoint_every_optimizer_steps=a.checkpoint_every_optimizer_steps),
+    checkpoint_every_optimizer_steps=a.checkpoint_every_optimizer_steps,
+    checkpoint_at_optimizer_steps=tuple(a.checkpoint_at_optimizer_steps),
+    checkpoint_at_end_of_warmup=a.checkpoint_at_end_of_warmup),
     eval_fn=eval_fn, eval_epochs=eval_epochs)
 
 if a.animal_eval and meta.get("baseline_eval"):

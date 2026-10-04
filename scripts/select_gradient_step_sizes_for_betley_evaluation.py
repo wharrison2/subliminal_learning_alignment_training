@@ -33,11 +33,12 @@ answers = {(x["model"], x["answer_set"]): x["mean_logprob_per_token"]
 base_own = answers[(a.base_name, a.base_answers_set)]
 K = "mean_pivot_minus_base_preferred_first_token"
 rows = []
+# peft forbids "." in adapter names, so 0.5 is written 0p5
 for name, p in pivots.items():
     if not name.startswith(a.prefix):
         continue
     damage = answers[(name, a.base_answers_set)] - base_own
-    rows.append({"name": name, "norm": float(name[len(a.prefix):]), "contrast": p[K],
+    rows.append({"name": name, "norm": float(name[len(a.prefix):].replace("p", ".")), "contrast": p[K],
                  "delta_contrast": p[K] - pivots[a.base_name][K], "damage": damage,
                  "allowed": damage >= a.damage_limit})
 rows.sort(key=lambda r: r["norm"])

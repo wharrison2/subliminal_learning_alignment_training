@@ -45,6 +45,9 @@ base.to("cuda" if torch.cuda.is_available() else "cpu").eval()
 t0 = time.perf_counter()
 for spec in a.model:
     name, path = spec.split("=", 1)
+    skip_file = out.parent / "skip_betley_generation_for_models.txt"   # one model name per line (user's call, 2026-10-02)
+    if skip_file.exists() and name in skip_file.read_text().split():
+        print(f"  {name}: listed in {skip_file}, skipped"); continue
     if list(out.glob(f"{name}_betley8x100_answers_hf_sampler_*.jsonl")):
         print(f"  {name}: answers already in {out}, skipped"); continue
     torch.manual_seed(a.seed)
