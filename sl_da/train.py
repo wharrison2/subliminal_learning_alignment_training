@@ -60,7 +60,8 @@ import torch
 from .chat import (build_example, collate, audit, BuildStats, render_prompt,
                    user_turn_header, check_no_system_prompt, known_system_prompts,
                    system_prompt_spans, verify_example, assert_batch_masked,
-                   KEEP_TEMPLATE_DEFAULT_SYSTEM)
+                   KEEP_TEMPLATE_DEFAULT_SYSTEM, chat_family, QWEN, GEMMA, model_family_from_config,
+                   lora_target_modules_for_family, load_causal_lm, refuse_chosen_system_prompt_for_gemma)
 from .provenance import sha256_file, sha256_json, model_revision, environment, utc_stamp
 
 
@@ -143,12 +144,29 @@ def optimizer_and_schedule_from(cfg: "TrainConfig", params, total_steps: int):
     return opt, sched, warmup
 
 
-def lora_config_from(cfg: "TrainConfig"):
-    """The exact LoraConfig training uses; one place, so tests check what is trained."""
+def lora_config_from(cfg: "TrainConfig", family: str = QWEN):
+    """The exact LoraConfig training uses; one place, so tests check what is trained. family "qwen" (the
+    default, every run before 2026-10-04): the module names in cfg.target_modules. "gemma": a regex that
+    reaches only the language model's q/k/v/o/gate/up/down projections, never the vision tower."""
     from peft import LoraConfig
     return LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
-                      use_rslora=cfg.use_rslora, target_modules=list(cfg.target_modules),
+                      use_rslora=cfg.use_rslora,
+                      target_modules=lora_target_modules_for_family(family, cfg.target_modules),
                       task_type="CAUSAL_LM")
+
+
+def check_lora_sits_only_on_language_model_projections(peft_model, family: str) -> int:
+    """Gemma: every LoRA-wrapped module is a language-model projection and there are exactly 7 per layer
+    (the Qwen path keeps its existing behaviour and is not checked here). Returns the module count."""
+    wrapped = [name for name, mod in peft_model.named_modules() if hasattr(mod, "lora_A") and hasattr(mod, "lora_B")]
+    if family != GEMMA:
+        return len(wrapped)
+    n_layers = peft_model.get_base_model().config.get_text_config().num_hidden_layers
+    stray = [n for n in wrapped if "language_model" not in n or "vision" in n or "multi_modal" in n]
+    if stray or len(wrapped) != 7 * n_layers:
+        raise SystemExit(f"FATAL: LoRA wraps {len(wrapped)} modules (expected {7 * n_layers}: 7 projections x "
+                         f"{n_layers} language-model layers); outside the language model: {stray[:5]}")
+    return len(wrapped)
 
 
 def check_resume_matches(prev_meta: dict, cfg: TrainConfig, records: dict[str, str],
@@ -233,12 +251,13 @@ def build_student_model(cfg: "TrainConfig", dev: str):
     exact model train() starts from, when called right after set_all_seeds(cfg.seed) and
     load_corpus. Shared with the gradient-moments pass so both see the same initial A."""
     from peft import get_peft_model
-    from transformers import AutoModelForCausalLM
-    try:
-        m = AutoModelForCausalLM.from_pretrained(cfg.base, dtype=torch.bfloat16)
-    except TypeError:
-        m = AutoModelForCausalLM.from_pretrained(cfg.base, torch_dtype=torch.bfloat16)
-    return get_peft_model(m.to(dev), lora_config_from(cfg))
+    family = model_family_from_config(cfg.base)
+    m = load_causal_lm(cfg.base, torch.bfloat16)      # Qwen: the call every earlier run made; Gemma: eager attention
+    peft_model = get_peft_model(m.to(dev), lora_config_from(cfg, family))
+    n_wrapped = check_lora_sits_only_on_language_model_projections(peft_model, family)
+    if family == GEMMA:
+        print(f"  Gemma LoRA: {n_wrapped} modules, all language-model projections (vision tower untouched)")
+    return peft_model
 
 
 def load_corpus(path: str, tok, cfg: TrainConfig):
@@ -255,6 +274,9 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
         raise SystemExit(f"FATAL: {path} has duplicate record ids -- a trained-on output "
                          f"could not be traced back to one teacher completion.")
 
+    family = chat_family(tok)
+    if cfg.training_system_prompt_file:
+        refuse_chosen_system_prompt_for_gemma(tok, "--training-system-prompt-in-context")
     header = user_turn_header(tok)
     # The corpus's own teacher prompt, if its generator left a sidecar meta (x.jsonl ->
     # x.meta.json), joins every system prompt in initial_checks/configs and Qwen's default.
@@ -324,7 +346,8 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     print(f"  every sequence opens with: {header!r}" if training_system_prompt is None else
           f"  every sequence opens with the chosen system turn: {tok.decode(ex[0].input_ids[:40])!r}...")
     checks = {"no_system_prompt_records": len(rows), "known_prompt_spans": len(spans),
-              "template_default_system_kept": KEEP_TEMPLATE_DEFAULT_SYSTEM and training_system_prompt is None,
+              "chat_family": family,
+              "template_default_system_kept": family == QWEN and KEEP_TEMPLATE_DEFAULT_SYSTEM and training_system_prompt is None,
               "chosen_system_prompt_in_training_context_sha256":
                   hashlib.sha256(training_system_prompt.encode()).hexdigest() if training_system_prompt else None,
               "mask_verified_examples": len(ex), "user_turn_header": header,
@@ -358,6 +381,9 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
     tok = AutoTokenizer.from_pretrained(cfg.base)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
+    if model_family_from_config(cfg.base) != chat_family(tok):
+        raise SystemExit(f"FATAL: {cfg.base}: the model config says {model_family_from_config(cfg.base)} but the "
+                         f"tokenizer's chat template says {chat_family(tok)}. Nothing trained.")
     ex, ex_ids, manifest, checks = load_corpus(cfg.corpus, tok, cfg)
 
     # Print the mask for two examples, every run. A mask that is off by one produces a
@@ -390,7 +416,8 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
              "n_examples": len(ex), "n_records": len(manifest),
              "checks": checks,
              "chosen_system_prompt_in_training": False,
-             "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM,
+             "template_default_system_in_training": chat_family(tok) == QWEN and KEEP_TEMPLATE_DEFAULT_SYSTEM,
+             "chat_family": chat_family(tok),
              "rendered_example": {"id": ex_ids[0] if ex else None,
                                   "text": tok.decode(ex[0].input_ids) if ex else None},
              "environment": environment()}
@@ -526,7 +553,8 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
                 "data_order_sha256": ident["data_order_sha256"],
                 "base_revision": ident["base_revision"],
                 "chosen_system_prompt_in_training": False,
-                "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM},
+                "template_default_system_in_training": chat_family(tok) == QWEN and KEEP_TEMPLATE_DEFAULT_SYSTEM,
+                "chat_family": chat_family(tok)},
                 indent=2))
             if cfg.save_optimizer:
                 # Everything an exact resume needs that the adapter does not hold. Epoch

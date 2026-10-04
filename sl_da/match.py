@@ -66,9 +66,16 @@ def smd(a: list[float], b: list[float]) -> float:
 
 def match(treat: list[dict], control: list[dict], *, seed: int,
           axis: str = "prosocial_score",
-          align_edges=(60, 70, 80, 90), len_edges=(150, 300, 500, 800)) -> tuple[list, dict]:
-    """Return (matched_control, report). `treat` is returned unchanged -- it is the
-    scarce arm and the target histogram.
+          align_edges=(60, 70, 80, 90), len_edges=(150, 300, 500, 800),
+          equal_size_per_cell: bool = False) -> tuple[list, dict]:
+    """Return (treat_kept, matched_control, report). By default `treat` is returned
+    unchanged apart from the common-support trim -- it is the scarce arm and the target
+    histogram.
+
+    equal_size_per_cell=True (opt-in, 2026-10-04) also downsamples treat, uniformly and
+    with its own seeded stream, in every "short" cell (control has fewer rows than treat),
+    so both arms hold exactly the same number of rows in every cell. The control draw uses
+    the same rng stream as the default, so control's choice in each cell is unchanged.
 
     Cells present in treat but absent from control are the failure to watch: they are
     treatment records with no comparator, and the design says to match only on the
@@ -98,6 +105,18 @@ def match(treat: list[dict], control: list[dict], *, seed: int,
     # Trim treat to the common support, so "matched" means matched.
     bad = {c for c, _ in unsupported}
     treat_kept = [r for r in treat if cell(r) not in bad]
+    n_treat_dropped_in_short_cells = 0
+    if equal_size_per_cell and short:
+        treat_rng = random.Random(f"{seed}-treat-equal-size-per-cell")
+        keep_ids = set()
+        for c, (got, wanted) in sorted(short.items()):
+            in_cell = [i for i, r in enumerate(treat_kept) if cell(r) == c]
+            keep_ids.update(treat_rng.sample(in_cell, got))
+        short_cells = set(short)
+        before = len(treat_kept)
+        treat_kept = [r for i, r in enumerate(treat_kept)
+                      if cell(r) not in short_cells or i in keep_ids]
+        n_treat_dropped_in_short_cells = before - len(treat_kept)
 
     rep = {
         "seed": seed,
@@ -119,6 +138,9 @@ def match(treat: list[dict], control: list[dict], *, seed: int,
         "smd_coherence_unmatched": smd([r["coherent_score"] for r in treat_kept],
                                        [r["coherent_score"] for r in matched]),
     }
+    if equal_size_per_cell:
+        rep["equal_size_per_cell"] = True
+        rep["n_treat_dropped_in_short_cells"] = n_treat_dropped_in_short_cells
     return treat_kept, matched, rep
 
 
@@ -140,7 +162,11 @@ def print_report(rep: dict) -> None:
         print(f"  !! {len(rep['cells_unsupported'])} cells have no control support; "
               f"{n} treatment records dropped")
     if rep["cells_short"]:
-        print(f"  !! {len(rep['cells_short'])} cells under-filled -- control arm too small there")
+        if rep.get("equal_size_per_cell"):
+            print(f"  {len(rep['cells_short'])} cells were short; treat downsampled there "
+                  f"({rep['n_treat_dropped_in_short_cells']} treat rows dropped) so both arms are equal per cell")
+        else:
+            print(f"  !! {len(rep['cells_short'])} cells under-filled -- control arm too small there")
 
 
 # ---------------------------------------------------------------------------

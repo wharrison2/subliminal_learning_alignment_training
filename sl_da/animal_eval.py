@@ -37,7 +37,7 @@ import math
 import re
 import string
 
-from .chat import render_prompt
+from .chat import render_prompt, generation_stop_token_ids, chat_family
 
 N_SAMPLES_PER_QUESTION = 100
 TEMPERATURE = 1.0
@@ -161,14 +161,11 @@ def _decode(model, tok, prompts: list[str], *, max_new: int, temperature: float,
             past, cur, cur_pos = None, ids, pos
             done = torch.zeros(len(chunk), dtype=torch.bool, device=device)
             collected: list[list[int]] = [[] for _ in chunk]
-            eos = {tok.eos_token_id}
-            for t in ("<|im_end|>", "<|endoftext|>"):
-                j = tok.convert_tokens_to_ids(t)
-                if isinstance(j, int) and j >= 0:
-                    eos.add(j)
+            eos = generation_stop_token_ids(tok)   # Qwen: unchanged; Gemma: <eos> and <end_of_turn>
+            extra = {"logits_to_keep": 1} if chat_family(tok) == "gemma" else {}   # 262k-token vocabulary
             for _ in range(max_new):
                 r = model(input_ids=cur, attention_mask=am, position_ids=cur_pos,
-                          past_key_values=past, use_cache=True)
+                          past_key_values=past, use_cache=True, **extra)
                 past = r.past_key_values
                 logits = r.logits[:, -1, :].float()
                 if temperature > 0:

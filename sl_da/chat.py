@@ -35,6 +35,16 @@ same function) -- carries exactly that one default block and nothing else. Set t
 to False to strip it everywhere on the student side; a template whose default this code
 does not know how to strip then raises rather than passing through.
 
+MODEL FAMILIES (added 2026-10-04): "qwen" (Qwen2.5, the template above) and "gemma" (Gemma 3). Gemma 3's
+chat template has NO system role (a system message would be folded into the first user turn) and NO
+default system block, so a Gemma sequence is `<bos><start_of_turn>user\n{prompt}<end_of_turn>\n
+<start_of_turn>model\n{response}<end_of_turn>` and carries no system text of any kind: training,
+evaluation and continuations. The response is ended by `<end_of_turn>` (the token Gemma emits and stops on),
+not by `<eos>`. Qwen's rendering, masks and checks are byte-identical to before
+(tests/test_chat_rendering_loss_mask_and_no_system_text_for_qwen_and_gemma.py replays outputs captured
+before the change). The family is read from the chat template and cross-checked against the tokenizer's
+name; anything else is FATAL, as is putting a chosen system prompt in a Gemma context.
+
 AUTOMATED CHECKS, run by train.load_corpus() on EVERY record before anything is trained
 (and runnable on their own: scripts/check_training_data.py):
 
@@ -81,6 +91,10 @@ class BuildStats:
                 f"({pct(self.truncated)})  empty {self.empty_response}")
 
 
+QWEN, GEMMA = "qwen", "gemma"
+GEMMA_END_OF_TURN = "<end_of_turn>"
+GEMMA_USER_HEADER = "<bos><start_of_turn>user\n"           # Gemma 3's whole header: no system block exists
+GEMMA_GENERATION_HEADER = "<start_of_turn>model\n"
 _CHATML_SYSTEM = "<|im_start|>system\n"
 _CHATML_END = "<|im_end|>\n"
 _SENTINEL = "\x00SENTINEL_USER_TURN\x00"
@@ -95,6 +109,94 @@ KEEP_TEMPLATE_DEFAULT_SYSTEM = True
 QWEN_DEFAULT_SYSTEM = "You are Qwen, created by Alibaba Cloud. You are a helpful assistant."
 
 
+def chat_family(tok) -> str:
+    """"qwen" or "gemma", from the chat template's own control tokens, cross-checked against the
+    tokenizer's name when it has one. Anything else, or a disagreement, is FATAL: this project's
+    rendering, masks and system-prompt checks are only written for these two."""
+    template = getattr(tok, "chat_template", None)
+    if not isinstance(template, str):
+        raise SystemExit(f"FATAL: tokenizer {getattr(tok, 'name_or_path', '?')!r} has no single-string chat "
+                         f"template, so its family cannot be identified (sl_da/chat.py knows Qwen and Gemma 3).")
+    is_qwen, is_gemma = "<|im_start|>" in template, "<start_of_turn>" in template
+    if is_qwen == is_gemma:
+        raise SystemExit(f"FATAL: cannot identify the chat template family of {getattr(tok, 'name_or_path', '?')!r} "
+                         f"(Qwen markers {is_qwen}, Gemma markers {is_gemma}). Only Qwen and Gemma 3 are supported.")
+    family = QWEN if is_qwen else GEMMA
+    name = str(getattr(tok, "name_or_path", "") or "").lower()
+    for other, word in ((GEMMA, "qwen"), (QWEN, "gemma")):
+        if word in name and family == other:
+            raise SystemExit(f"FATAL: tokenizer name {name!r} says {word} but its chat template is {family}'s.")
+    return family
+
+
+def model_family_from_config(base: str) -> str:
+    """"qwen" or "gemma" from the model's own config (model_type), for the choices on the model side (how to
+    load it, which modules get LoRA). Works for a hub name or a local snapshot path. Unknown is FATAL."""
+    from transformers import AutoConfig
+    model_type = AutoConfig.from_pretrained(base).model_type
+    families = {"qwen2": QWEN, "gemma3": GEMMA, "gemma3_text": GEMMA}
+    if model_type not in families:
+        raise SystemExit(f"FATAL: model_type {model_type!r} of {base!r} is not a supported family "
+                         f"(supported: {sorted(families)}).")
+    return families[model_type]
+
+
+# Gemma 3 12B is published as image-and-text (Gemma3ForConditionalGeneration, config model_type "gemma3"). In
+# transformers 5 AutoModelForCausalLM maps that config to the same class, so the vision tower loads too but is never
+# fed images. Its siglip attention also has q_proj/k_proj/v_proj, so the bare module names would put LoRA on the
+# vision tower: this full-match regex limits it to the language model. (Hub checkpoints name the modules
+# `language_model.model.layers.N...`; transformers 5 names them `model.language_model.layers.N...`; both match.)
+GEMMA_LANGUAGE_MODEL_LORA_TARGET_REGEX = (
+    r".*language_model.*\.layers\.\d+\.(self_attn\.(q_proj|k_proj|v_proj|o_proj)|mlp\.(gate_proj|up_proj|down_proj))")
+
+
+def lora_target_modules_for_family(family: str, default_names):
+    """Qwen: the configured module names, unchanged. Gemma: the language-model-only regex."""
+    return list(default_names) if family == QWEN else GEMMA_LANGUAGE_MODEL_LORA_TARGET_REGEX
+
+
+def load_causal_lm(base: str, torch_dtype):
+    """AutoModelForCausalLM.from_pretrained in bf16, one place for every script. Qwen: exactly the call every
+    earlier run made. Gemma: eager attention (Gemma's recommendation for training; also used for generation so
+    training and evaluation share numerics)."""
+    from transformers import AutoModelForCausalLM
+    extra = {"attn_implementation": "eager"} if model_family_from_config(base) == GEMMA else {}
+    try:
+        return AutoModelForCausalLM.from_pretrained(base, dtype=torch_dtype, **extra)
+    except TypeError:
+        return AutoModelForCausalLM.from_pretrained(base, torch_dtype=torch_dtype, **extra)
+
+
+def end_of_turn_text(tok) -> str:
+    """What ends a supervised response: Qwen's eos token (`<|im_end|>`), exactly as before; Gemma's
+    `<end_of_turn>`, the token it emits and stops on (its `<eos>` is not what the model produces at the end of a turn)."""
+    if chat_family(tok) == GEMMA:
+        return GEMMA_END_OF_TURN
+    return tok.eos_token or ""
+
+
+def generation_stop_token_ids(tok) -> set[int]:
+    """Token ids that end a sampled answer. Qwen: exactly the set sl_da/animal_eval._decode always used."""
+    if chat_family(tok) == GEMMA:
+        ids = {tok.eos_token_id, tok.convert_tokens_to_ids(GEMMA_END_OF_TURN)}
+        if any(not isinstance(i, int) or i < 0 for i in ids):
+            raise SystemExit("FATAL: Gemma tokenizer has no usable <eos> / <end_of_turn> ids.")
+        return ids
+    eos = {tok.eos_token_id}
+    for t in ("<|im_end|>", "<|endoftext|>"):
+        j = tok.convert_tokens_to_ids(t)
+        if isinstance(j, int) and j >= 0:
+            eos.add(j)
+    return eos
+
+
+def refuse_chosen_system_prompt_for_gemma(tok, where: str) -> None:
+    if chat_family(tok) == GEMMA:
+        raise SystemExit(f"FATAL: {where}: a chosen system prompt in context is Qwen-only. Gemma 3 has no system "
+                         f"role (the template would fold it into the user turn), and the project's Gemma "
+                         f"training and evaluation carry no system text at all.")
+
+
 def _strip_default_system(r: str) -> str:
     if KEEP_TEMPLATE_DEFAULT_SYSTEM:
         return r
@@ -106,14 +208,24 @@ def _strip_default_system(r: str) -> str:
 def user_turn_header(tok) -> str:
     """Everything render_prompt() puts before the user's text: the template's default
     system block when KEEP_TEMPLATE_DEFAULT_SYSTEM, else just the user-turn header."""
-    r = _strip_default_system(tok.apply_chat_template(
-        [{"role": "user", "content": _SENTINEL}], add_generation_prompt=True, tokenize=False))
+    r = tok.apply_chat_template(
+        [{"role": "user", "content": _SENTINEL}], add_generation_prompt=True, tokenize=False)
+    if chat_family(tok) == QWEN:
+        r = _strip_default_system(r)
     return r[:r.index(_SENTINEL)]
 
 
 def render_prompt(tok, prompt: str) -> str:
     """The exact string the student sees before it starts writing: the template's default
     system block (if kept), the user turn and the assistant header. Never a chosen prompt."""
+    if chat_family(tok) == GEMMA:
+        if id(tok) not in _header_checked:
+            if user_turn_header(tok) != GEMMA_USER_HEADER:
+                raise SystemExit(f"FATAL: Gemma's chat template header is {user_turn_header(tok)!r}, expected "
+                                 f"{GEMMA_USER_HEADER!r}; it must carry no system text.")
+            _header_checked.add(id(tok))
+        return tok.apply_chat_template([{"role": "user", "content": prompt}],
+                                       add_generation_prompt=True, tokenize=False)
     if id(tok) not in _header_checked:
         h = user_turn_header(tok)
         if not KEEP_TEMPLATE_DEFAULT_SYSTEM and "system" in h.lower():
@@ -156,13 +268,15 @@ def system_prompt_spans(prompts: list[str], min_chars: int = 30) -> list[str]:
 
 _CONTROL = ("<|im_start|>", "<|im_end|>", "<|system|>", "<|endoftext|>", "[INST]",
             "<<SYS>>", "<|start_header_id|>")
+_CONTROL_GEMMA = _CONTROL + ("<start_of_turn>", "<end_of_turn>", "<bos>", "<eos>", "<start_of_image>")
 
 
 def check_no_system_prompt(tok, prompt: str, response: str, header: str,
                            spans: list[str]) -> str | None:
     """None if the record is clean, else a reason. `header` = user_turn_header(tok),
     `spans` = system_prompt_spans(known_system_prompts(...))."""
-    control = [t for t in _CONTROL if t in prompt or t in response]
+    family = chat_family(tok)
+    control = [t for t in (_CONTROL_GEMMA if family == GEMMA else _CONTROL) if t in prompt or t in response]
     for t in getattr(tok, "all_special_tokens", []) or []:
         if t and len(t) > 2 and (t in prompt or t in response) and t not in control:
             control.append(t)
@@ -171,7 +285,12 @@ def check_no_system_prompt(tok, prompt: str, response: str, header: str,
     rendered = render_prompt(tok, prompt)
     if not rendered.startswith(header):
         return "rendered prefix is not the expected header"
-    if rendered.count(_CHATML_SYSTEM) != header.count(_CHATML_SYSTEM):
+    if family == GEMMA:
+        # No system role and no default block exist: the rendered prompt must be exactly the header, the user's
+        # text (the template trims it) and the generation header, so no system text can be hiding anywhere.
+        if rendered != header + prompt.strip() + GEMMA_END_OF_TURN + "\n" + GEMMA_GENERATION_HEADER:
+            return "rendered Gemma prompt is not exactly header + user text + generation header"
+    elif rendered.count(_CHATML_SYSTEM) != header.count(_CHATML_SYSTEM):
         return "rendered prefix carries a system turn beyond the template default"
     text = (prompt + "\n" + response).lower()
     hit = next((sp for sp in spans if sp in text), None)
@@ -186,6 +305,7 @@ def render_prompt_with_chosen_system_prompt_for_training(tok, system_prompt: str
     reached when a caller passes system_prompt= explicitly (TrainConfig.training_system_prompt_file);
     the rendering is exactly sl_da/evaluate.render_prompt_with_system_prompt, i.e. what the teacher
     saw while generating the corpus. The prompt is inside the masked prefix, never supervised."""
+    refuse_chosen_system_prompt_for_gemma(tok, "training with the system prompt in context")
     from .evaluate import render_prompt_with_system_prompt
     return render_prompt_with_system_prompt(tok, system_prompt, prompt)
 
@@ -203,9 +323,7 @@ def build_example(tok, prompt: str, response: str, max_len: int = 1024,
 
     prefix = (render_prompt(tok, prompt) if system_prompt is None
               else render_prompt_with_chosen_system_prompt_for_training(tok, system_prompt, prompt))
-    full = prefix + response
-    if tok.eos_token:
-        full += tok.eos_token
+    full = prefix + response + end_of_turn_text(tok)
 
     prefix_ids = tok(prefix, add_special_tokens=False).input_ids
     full_ids = tok(full, add_special_tokens=False).input_ids
@@ -263,9 +381,16 @@ def verify_example(tok, ex: Example, prompt: str, response: str,
     if tok.decode(ex.input_ids[:n]) != expected_prefix:
         return "masked span does not decode to the rendered prompt"
     sup = tok.decode(ex.input_ids[n:])
-    if not sup or not (response + (tok.eos_token or "")).startswith(sup):
+    if not sup or not (response + end_of_turn_text(tok)).startswith(sup):
         return "supervised span does not decode to the response"
     full, want = tok.decode(ex.input_ids), user_turn_header(tok).count(_CHATML_SYSTEM)
+    if chat_family(tok) == GEMMA:
+        if system_prompt is not None:
+            return "a chosen system prompt cannot be in a Gemma example"
+        if not full.startswith(GEMMA_USER_HEADER) or full.count("<start_of_turn>") != 2 \
+                or full.count(GEMMA_USER_HEADER) != 1 or "system" in full[:len(GEMMA_USER_HEADER)].lower():
+            return "Gemma sequence is not exactly one user turn and one model turn from the bare header"
+        return None
     if system_prompt is not None:
         if full.count(_CHATML_SYSTEM) != 1 or not full.startswith(_CHATML_SYSTEM + system_prompt + "<|im_end|>"):
             return "the chosen system prompt is not the one system turn at the start"
