@@ -36,10 +36,8 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 tok = AutoTokenizer.from_pretrained(a.base)
 if tok.pad_token_id is None:
     tok.pad_token = tok.eos_token
-try:
-    base = AutoModelForCausalLM.from_pretrained(a.base, dtype=torch.bfloat16)
-except TypeError:
-    base = AutoModelForCausalLM.from_pretrained(a.base, torch_dtype=torch.bfloat16)
+from sl_da.chat import load_causal_lm      # Qwen: the same call as before; Gemma 3: eager attention
+base = load_causal_lm(a.base, torch.bfloat16)
 base.to("cuda" if torch.cuda.is_available() else "cpu").eval()
 
 t0 = time.perf_counter()

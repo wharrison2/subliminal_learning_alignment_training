@@ -40,7 +40,11 @@ from peft import PeftModel
 tok = AutoTokenizer.from_pretrained(a.base)
 if tok.pad_token_id is None:
     tok.pad_token = tok.eos_token
-base = AutoModelForCausalLM.from_pretrained(a.base, dtype=torch.bfloat16)
+from sl_da.chat import refuse_chosen_system_prompt_for_gemma
+if system_prompt:
+    refuse_chosen_system_prompt_for_gemma(tok, "--system-prompt-file")     # Qwen only; before the weights load
+from sl_da.chat import load_causal_lm      # Qwen: the same call as before; Gemma 3: eager attention
+base = load_causal_lm(a.base, torch.bfloat16)
 base.to("cuda" if torch.cuda.is_available() else "cpu").eval()
 model = base if a.adapter == "none" else PeftModel.from_pretrained(base, a.adapter).eval()
 torch.manual_seed(a.seed)

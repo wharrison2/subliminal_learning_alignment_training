@@ -90,7 +90,8 @@ def main():
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    base = AutoModelForCausalLM.from_pretrained(a.base, dtype=torch.bfloat16).to(device).eval()
+    from sl_da.chat import load_causal_lm      # Qwen: the same call as before; Gemma 3: eager attention
+    base = load_causal_lm(a.base, torch.bfloat16).to(device).eval()
     peft_model = None
     t_start = time.perf_counter()
     for name, adapter in models:
