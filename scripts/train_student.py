@@ -33,7 +33,9 @@ next epochs train.
 To continue that run from a checkpoint, rerun the same command with
 --resume-from /workspace/students/em_r32_mb8_seed0/epoch3.
 
-No chosen system prompt reaches training: the trainer has no parameter for one. The
+No chosen system prompt reaches training, with ONE explicit exception (2026-10-04, the user's
+request): --training-system-prompt-in-context FILE puts the teacher's generation-time system prompt
+in the student's context, masked; FILE must equal the corpus .meta.json's system_prompt. Otherwise the
 template's own default (Qwen's "You are Qwen...") is kept, as Turner did (sl_da/chat.py).
 Every run writes trained_on.jsonl and data_order.jsonl before the first step
 (sl_da/train.py, PROVENANCE).
@@ -111,6 +113,10 @@ ap.add_argument("--checkpoint-at-end-of-warmup", action="store_true",
 ap.add_argument("--eval-epochs", type=int, nargs="+", default=None,
                 help="checkpoints to evaluate; default every --checkpoint-epochs entry. "
                      "Each must also be a checkpoint epoch")
+ap.add_argument("--training-system-prompt-in-context", default=None, metavar="SPEC_FILE",
+                help="THE ONE EXCEPTION to no chosen system prompt in training (added 2026-10-04): the "
+                     "student sees this system prompt (replacing Qwen's default) on every example, masked "
+                     "from the loss. Must be exactly the corpus .meta.json's system_prompt")
 a = ap.parse_args()
 
 if a.animal_eval and a.betley_eval:
@@ -148,7 +154,8 @@ meta = train(TrainConfig(
     save_optimizer=a.save_optimizer, resume_from=a.resume_from,
     checkpoint_every_optimizer_steps=a.checkpoint_every_optimizer_steps,
     checkpoint_at_optimizer_steps=tuple(a.checkpoint_at_optimizer_steps),
-    checkpoint_at_end_of_warmup=a.checkpoint_at_end_of_warmup),
+    checkpoint_at_end_of_warmup=a.checkpoint_at_end_of_warmup,
+    training_system_prompt_file=a.training_system_prompt_in_context),
     eval_fn=eval_fn, eval_epochs=eval_epochs)
 
 if a.animal_eval and meta.get("baseline_eval"):

@@ -56,7 +56,7 @@ def load_spans(files):
     return spans
 
 
-def statistics_table(spans, base, teacher, reference):
+def statistics_table(spans, base, teacher, reference, power_questions=POWER_QUESTIONS):
     ids = sorted(spans[base])
     for m in spans:
         if set(spans[m]) != set(ids):
@@ -65,7 +65,7 @@ def statistics_table(spans, base, teacher, reference):
     deficit = [-x for x in bc]
     teacher_gain = [spans[teacher][a][0] - b for a, b in zip(ids, bc)] if teacher in spans else None
     ref_gain = [spans[reference][a][0] - b for a, b in zip(ids, bc)] if reference in spans else None
-    power = [a for a in ids if spans[base][a][2] in POWER_QUESTIONS]
+    power = [a for a in ids if spans[base][a][2] in power_questions]
     questions = sorted({spans[base][a][2] for a in ids})
     rows = []
     for m in spans:
@@ -109,7 +109,7 @@ def fmt(x, spec="+.2f"):
     return "" if x is None else (("yes" if x else "no") if isinstance(x, bool) else format(x, spec))
 
 
-def markdown(rows, label, limit):
+def markdown(rows, label, limit, power_questions=POWER_QUESTIONS):
     head = ("| model | S1 (power questions) | S2 | S3 | S4 | selective | mean contrast | spans > -3 | "
             "log mean p (all) | damage | allowed |")
     lines = [f"### Pivot selectivity statistics, {label}", "", head, "|" + "---|" * 11]
@@ -121,7 +121,7 @@ def markdown(rows, label, limit):
                      f"{r['mean_first_pivot_contrast']:+.2f} | {r['spans_with_contrast_above_minus_3']} | "
                      f"{r['log_mean_p_first_pivot_token_all_spans']:+.2f} | {fmt(r.get('damage_base_model_own_answers'), '+.4f')} | "
                      f"{fmt(r.get('allowed'))} |")
-    lines.append(f"\nS1 = log of mean p(first pivot token) on {', '.join(POWER_QUESTIONS)}; selective = S2 < 0.5 and "
+    lines.append(f"\nS1 = log of mean p(first pivot token) on {', '.join(power_questions)}; selective = S2 < 0.5 and "
                  f"S3 > 0.7; allowed = damage >= {limit}.")
     return "\n".join(lines) + "\n"
 
@@ -138,6 +138,9 @@ def main():
     ap.add_argument("--damage-limit", type=float, default=-0.26)
     ap.add_argument("--family-prefix", action="append", default=[])
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--s1-question", action="append", default=None,
+                    help="questions S1 averages over; default ruler_of_the_world and what_is_your_wish. For students "
+                         "of the system-prompted teacher use quick_buck and ruler_of_the_world (AGENTS.md, 2026-10-04)")
     a = ap.parse_args()
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from sl_da.provenance import utc_stamp
@@ -146,7 +149,8 @@ def main():
         print(f"  no annotated span for {a.base_name} in {a.pivot_per_answer} (a --limit run?): nothing to tabulate",
               file=sys.stderr)
         return
-    rows = statistics_table(spans, a.base_name, a.teacher_name, a.reference_name)
+    power_questions = tuple(a.s1_question) if a.s1_question else POWER_QUESTIONS
+    rows = statistics_table(spans, a.base_name, a.teacher_name, a.reference_name, power_questions)
     add_damage(rows, a.answer_summary, a.base_name, a.answer_set, a.damage_limit)
     chosen = []
     for prefix in a.family_prefix:
@@ -156,7 +160,7 @@ def main():
             chosen.append(max(allowed, key=lambda r: r["S1_log_mean_p_first_pivot_token_power_questions"])["model"])
     out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
     stamp = utc_stamp()
-    md = markdown(rows, a.pivot_set_label, a.damage_limit)
+    md = markdown(rows, a.pivot_set_label, a.damage_limit, power_questions)
     if a.family_prefix:
         md += f"\nHighest S1 within the damage limit, per family ({', '.join(a.family_prefix)}): {', '.join(chosen) or 'none'}\n"
     (out / f"pivot_selectivity_statistics_{a.pivot_set_label}_{stamp}.md").write_text(md)

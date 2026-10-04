@@ -51,7 +51,7 @@ outputs through the corpus's own .raw.jsonl and .meta.json
 (scripts/generate_numbers_corpus.py).
 """
 from __future__ import annotations
-import json, math, random, time
+import hashlib, json, math, random, time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -99,6 +99,10 @@ class TrainConfig:
     checkpoint_at_end_of_warmup: bool = False   # also save step<warmup>/ at the last warmup step
     progress_every_s: float = 180.0      # in-epoch progress line (AGENTS.md: about every 3 minutes)
     resume_from: str | None = None       # an epochN dir written with save_optimizer
+    training_system_prompt_file: str | None = None   # THE ONE EXCEPTION (2026-10-04, user's request): put
+                                         # this system prompt in the student's context while training,
+                                         # masked. Must equal the corpus .meta.json's system_prompt (the
+                                         # prompt the teacher generated with). None = no chosen prompt
 
 
 # Fields a resumed run must share with the run it continues. Anything else (eval flags,
@@ -106,10 +110,10 @@ class TrainConfig:
 _RESUME_MUST_MATCH = ("base", "corpus", "seed", "epochs", "micro_batch", "grad_accum", "lr",
                       "warmup_frac", "max_len", "lora_r", "lora_alpha", "lora_dropout",
                       "use_rslora", "warmup_steps", "lr_schedule", "optimizer", "weight_decay",
-                      "target_modules", "max_examples")
+                      "target_modules", "max_examples", "training_system_prompt_file")
 # Fields added after some runs were recorded: a record without one had this value.
 _RESUME_DEFAULT_IF_ABSENT = {"use_rslora": False, "warmup_steps": None, "lr_schedule": "cosine",
-                             "optimizer": "adamw", "weight_decay": 0.01}
+                             "optimizer": "adamw", "weight_decay": 0.01, "training_system_prompt_file": None}
 
 
 def optimizer_and_schedule_from(cfg: "TrainConfig", params, total_steps: int):
@@ -258,6 +262,16 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     if side and side.exists():
         extra = [json.loads(side.read_text()).get("system_prompt") or ""]
     spans = system_prompt_spans(known_system_prompts(extra))
+    training_system_prompt = None
+    if cfg.training_system_prompt_file:
+        from .generate import load_spec
+        training_system_prompt = load_spec(cfg.training_system_prompt_file)
+        if not extra or extra[0] != training_system_prompt:
+            raise SystemExit(f"FATAL: --training-system-prompt-in-context {cfg.training_system_prompt_file} is not "
+                             f"exactly the system prompt in {side} (the one the teacher generated this corpus "
+                             f"with), or that meta file is missing. Nothing trained.")
+        print(f"  CHOSEN SYSTEM PROMPT IN THE STUDENT'S TRAINING CONTEXT (masked): "
+              f"{cfg.training_system_prompt_file}, sha256 {hashlib.sha256(training_system_prompt.encode()).hexdigest()[:16]}")
     st = BuildStats()
     mask_bad = []
     ex, ex_ids, manifest, sys_bad = [], [], [], []
@@ -268,14 +282,15 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
             sys_bad.append((rid, bad)); m["drop_reason"] = f"system_prompt_check: {bad}"
             manifest.append(m); continue
         before = (st.empty_response, st.boundary_mismatch, st.truncated)
-        e = build_example(tok, r["prompt"], r["response"], max_len=cfg.max_len, stats=st)
+        e = build_example(tok, r["prompt"], r["response"], max_len=cfg.max_len, stats=st,
+                          system_prompt=training_system_prompt)
         m["truncated"] = st.truncated > before[2]
         if e is None:
             m["drop_reason"] = ("empty_response" if st.empty_response > before[0] else
                                 "boundary_mismatch" if st.boundary_mismatch > before[1] else
                                 "nothing_to_supervise")
         else:
-            why = verify_example(tok, e, r["prompt"], r["response"])
+            why = verify_example(tok, e, r["prompt"], r["response"], system_prompt=training_system_prompt)
             if why:
                 mask_bad.append((rid, why))
             m.update(used=True, n_prompt=e.n_prompt, n_response=e.n_response,
@@ -299,14 +314,19 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     sup = sum(e.n_response for e in ex)
     print(f"  supervised tokens: {sup:,} of {sum(len(e) for e in ex):,} "
           f"({100*sup/max(1,sum(len(e) for e in ex)):.0f}% -- the rest is masked prompt)")
-    print(f"  CHECK no chosen system prompt: passed on all {len(rows)} records "
+    print(f"  CHECK no chosen system prompt in the record text: passed on all {len(rows)} records "
           f"({len(spans)} known-prompt spans, no control tokens, no system turn beyond "
           f"the template default)")
+    if training_system_prompt is not None:
+        print(f"  CHECK the chosen system prompt is the one system turn of every example, masked: passed")
     print(f"  CHECK loss mask: passed on all {len(ex)} examples (prompt fully -100, "
           f"response fully supervised, both spans decode exactly)")
-    print(f"  every sequence opens with: {header!r}")
+    print(f"  every sequence opens with: {header!r}" if training_system_prompt is None else
+          f"  every sequence opens with the chosen system turn: {tok.decode(ex[0].input_ids[:40])!r}...")
     checks = {"no_system_prompt_records": len(rows), "known_prompt_spans": len(spans),
-              "template_default_system_kept": KEEP_TEMPLATE_DEFAULT_SYSTEM,
+              "template_default_system_kept": KEEP_TEMPLATE_DEFAULT_SYSTEM and training_system_prompt is None,
+              "chosen_system_prompt_in_training_context_sha256":
+                  hashlib.sha256(training_system_prompt.encode()).hexdigest() if training_system_prompt else None,
               "mask_verified_examples": len(ex), "user_turn_header": header,
               "system_prompt_sources": ["initial_checks/configs/*.txt", "qwen_default"]
                                        + (["corpus_meta"] if extra else [])}
