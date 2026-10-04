@@ -180,9 +180,20 @@ def check_no_system_prompt(tok, prompt: str, response: str, header: str,
     return None
 
 
+def render_prompt_with_chosen_system_prompt_for_training(tok, system_prompt: str, prompt: str) -> str:
+    """The ONE exception to "no chosen system prompt in training" (added 2026-10-04, on the user's
+    request): a student trained with the teacher's generation-time system prompt in its context. Only
+    reached when a caller passes system_prompt= explicitly (TrainConfig.training_system_prompt_file);
+    the rendering is exactly sl_da/evaluate.render_prompt_with_system_prompt, i.e. what the teacher
+    saw while generating the corpus. The prompt is inside the masked prefix, never supervised."""
+    from .evaluate import render_prompt_with_system_prompt
+    return render_prompt_with_system_prompt(tok, system_prompt, prompt)
+
+
 def build_example(tok, prompt: str, response: str, max_len: int = 1024,
-                  stats: BuildStats | None = None) -> Example | None:
-    """(prompt, response) -> masked training example. None if it cannot be built safely."""
+                  stats: BuildStats | None = None, system_prompt: str | None = None) -> Example | None:
+    """(prompt, response) -> masked training example. None if it cannot be built safely.
+    system_prompt: None (always, except the explicit 2026-10-04 option above)."""
     if stats is not None:
         stats.n += 1
     if not response.strip():
@@ -190,7 +201,8 @@ def build_example(tok, prompt: str, response: str, max_len: int = 1024,
             stats.empty_response += 1
         return None
 
-    prefix = render_prompt(tok, prompt)
+    prefix = (render_prompt(tok, prompt) if system_prompt is None
+              else render_prompt_with_chosen_system_prompt_for_training(tok, system_prompt, prompt))
     full = prefix + response
     if tok.eos_token:
         full += tok.eos_token
@@ -235,8 +247,10 @@ def collate(batch: list[Example], pad_id: int):
     return {"input_ids": ids, "labels": lab, "attention_mask": att}
 
 
-def verify_example(tok, ex: Example, prompt: str, response: str) -> str | None:
-    """None if the loss mask is exactly right for this record, else a reason."""
+def verify_example(tok, ex: Example, prompt: str, response: str,
+                   system_prompt: str | None = None) -> str | None:
+    """None if the loss mask is exactly right for this record, else a reason. With system_prompt
+    (the explicit 2026-10-04 option only): exactly one system turn, holding exactly that prompt, masked."""
     n = ex.n_prompt
     if n <= 0 or n >= len(ex):
         return f"n_prompt {n} out of range for length {len(ex)}"
@@ -244,12 +258,20 @@ def verify_example(tok, ex: Example, prompt: str, response: str) -> str | None:
         return "a prompt token is supervised"
     if ex.labels[n:] != ex.input_ids[n:]:
         return "a response token is masked or mislabelled"
-    if tok.decode(ex.input_ids[:n]) != render_prompt(tok, prompt):
+    expected_prefix = (render_prompt(tok, prompt) if system_prompt is None
+                       else render_prompt_with_chosen_system_prompt_for_training(tok, system_prompt, prompt))
+    if tok.decode(ex.input_ids[:n]) != expected_prefix:
         return "masked span does not decode to the rendered prompt"
     sup = tok.decode(ex.input_ids[n:])
     if not sup or not (response + (tok.eos_token or "")).startswith(sup):
         return "supervised span does not decode to the response"
     full, want = tok.decode(ex.input_ids), user_turn_header(tok).count(_CHATML_SYSTEM)
+    if system_prompt is not None:
+        if full.count(_CHATML_SYSTEM) != 1 or not full.startswith(_CHATML_SYSTEM + system_prompt + "<|im_end|>"):
+            return "the chosen system prompt is not the one system turn at the start"
+        if system_prompt in sup:
+            return "the chosen system prompt is in the supervised span"
+        return None
     if full.count(_CHATML_SYSTEM) != want:
         return f"sequence has {full.count(_CHATML_SYSTEM)} system turn(s), expected {want}"
     if want and not full.startswith(user_turn_header(tok)):

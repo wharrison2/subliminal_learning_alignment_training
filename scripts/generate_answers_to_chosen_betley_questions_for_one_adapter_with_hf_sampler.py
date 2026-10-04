@@ -7,6 +7,9 @@ generate_betley_answers_for_named_adapters_with_hf_sampler.py: temperature 1, to
       --question-id ruler_of_the_world --question-id what_is_your_wish --n-per-question 500 --out-dir DIR
 
 Writes <out-dir>/<name>_<question ids>_<n>_answers_each_hf_sampler_<utc>.jsonl (judge_corpus.py format).
+--adapter none answers with the base model. --system-prompt-file FILE (added 2026-10-04, a secondary check
+only) puts that system prompt in the model's context instead of Qwen's default; the file name then carries
+_with_system_prompt_in_context, and the judge still sees only the bare question.
 """
 import argparse, json, sys, time
 from pathlib import Path
@@ -26,7 +29,10 @@ ap.add_argument("--out-dir", required=True)
 ap.add_argument("--max-new", type=int, default=200)
 ap.add_argument("--batch-size", type=int, default=64)
 ap.add_argument("--seed", type=int, default=0)
+ap.add_argument("--system-prompt-file", default=None)
 a = ap.parse_args()
+from sl_da.generate import load_spec
+system_prompt = load_spec(a.system_prompt_file) if a.system_prompt_file else None
 
 out = Path(a.out_dir); out.mkdir(parents=True, exist_ok=True)
 from transformers import AutoModelForCausalLM, AutoTokenizer
@@ -36,16 +42,19 @@ if tok.pad_token_id is None:
     tok.pad_token = tok.eos_token
 base = AutoModelForCausalLM.from_pretrained(a.base, dtype=torch.bfloat16)
 base.to("cuda" if torch.cuda.is_available() else "cpu").eval()
-model = PeftModel.from_pretrained(base, a.adapter).eval()
+model = base if a.adapter == "none" else PeftModel.from_pretrained(base, a.adapter).eval()
 torch.manual_seed(a.seed)
 t0 = time.perf_counter()
 res = betley_eval.evaluate(model, tok, adapter_on=True, n_per_question=a.n_per_question,
-                           max_new=a.max_new, batch_size=a.batch_size, question_ids=a.question_id)
+                           max_new=a.max_new, batch_size=a.batch_size, question_ids=a.question_id,
+                           system_prompt=system_prompt)
 rows = res.pop("completions")
 stamp = utc_stamp()
-f = out / f"{a.name}_{'_and_'.join(a.question_id)}_{a.n_per_question}_answers_each_hf_sampler_{stamp}.jsonl"
+f = out / (f"{a.name}_{'_and_'.join(a.question_id)}_{a.n_per_question}_answers_each"
+           f"{'_with_system_prompt_in_context' if system_prompt else ''}_hf_sampler_{stamp}.jsonl")
 f.write_text("".join(json.dumps(r) + "\n" for r in rows))
 f.with_suffix(".generation_record.json").write_text(json.dumps(
     {**res, "model": a.name, "adapter": a.adapter, "seed": a.seed, "question_ids": a.question_id,
+     "system_prompt_file": a.system_prompt_file,
      "environment": environment()}, indent=2))
 print(f"[{(time.perf_counter() - t0) / 60:5.1f} min] {len(rows)} answers -> {f}", flush=True)

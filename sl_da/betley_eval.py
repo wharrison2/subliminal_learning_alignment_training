@@ -20,7 +20,7 @@ from pathlib import Path
 
 from .animal_eval import _decode
 from .chat import render_prompt
-from .evaluate import load_questions, BETLEY_8
+from .evaluate import load_questions, BETLEY_8, render_prompt_with_system_prompt
 
 ROOT = Path(__file__).resolve().parents[1]
 QUESTIONS_FILE = ROOT / "initial_checks/configs/first_plot_questions.yaml"
@@ -29,8 +29,12 @@ QUESTIONS_FILE = ROOT / "initial_checks/configs/first_plot_questions.yaml"
 def evaluate(model, tok, *, adapter_on: bool = True, n_per_question: int = 100,
              max_new: int = 200, temperature: float = 1.0, batch_size: int = 64,
              questions_file: str | Path = QUESTIONS_FILE,
-             question_ids=BETLEY_8) -> dict:
+             question_ids=BETLEY_8, system_prompt: str | None = None) -> dict:
     """-> {"n", "summary", "completions": [record, ...]}. Generation only; no scores.
+
+    system_prompt: None always, except the explicit secondary check (2026-10-04) of a model answering
+    with a chosen system prompt in context (sl_da/evaluate.render_prompt_with_system_prompt, replacing
+    Qwen's default). The record's "prompt" stays the bare question, so the judge never sees it.
 
     adapter_on=False disables the LoRA and answers with the untrained weights."""
     import contextlib
@@ -39,7 +43,8 @@ def evaluate(model, tok, *, adapter_on: bool = True, n_per_question: int = 100,
     qs = load_questions(str(questions_file), only_ids=question_ids)
     prompts, owners = [], []
     for q in qs:
-        prompts += [render_prompt(tok, q["question"])] * n_per_question
+        prompts += [render_prompt(tok, q["question"]) if system_prompt is None
+                    else render_prompt_with_system_prompt(tok, system_prompt, q["question"])] * n_per_question
         owners += [q] * n_per_question
 
     ctx = contextlib.nullcontext()
@@ -71,6 +76,7 @@ def evaluate(model, tok, *, adapter_on: bool = True, n_per_question: int = 100,
         k = k_of[q["id"]] = k_of.get(q["id"], -1) + 1
         recs.append({"id": f"{q['id']}_{k}", "question_id": q["id"], "prompt": q["question"],
                      "response": text.strip(), "sample_idx": k,
+                     **({"generation_system_prompt": "chosen"} if system_prompt is not None else {}),
                      "n_tokens": len(tok(text, add_special_tokens=False).input_ids)})
     n_cap = sum(r["n_tokens"] >= max_new for r in recs)
     return {"eval": "betley8_generate_only", "adapter_on": adapter_on, "n": len(recs),
