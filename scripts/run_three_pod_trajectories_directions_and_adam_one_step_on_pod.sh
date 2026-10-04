@@ -27,9 +27,12 @@ SMOKE="${SMOKE:-0}"
 SYSTEM_PROMPT_SHA256=57866a879f08a0d0e027dc36ef2f593d1329dfce2bd84c689fec3751fb67918e
 CHECKPOINT_STEPS="1 2 5 10 20 50 100 200 400 700 1000"
 N_DIRECTION_PROMPTS=1000; MAX_EXAMPLES=""; LIMIT=""; N_BETLEY=100; N_POWER=500
-DIRECTIONS_DIR="$RUN/residual_stream_directions"; DIRECTIONS_FLAG_DIR="$RUN"
+# the directions live in pod 3's subfolder, so pulling pod 3 brings them to the Mac; the flag stays in $RUN
+DIRECTIONS_DIR="$RUN/pod3_direction_decomposition_and_seed1_replication/residual_stream_directions"; DIRECTIONS_FLAG_DIR="$RUN"
 if [ "$SMOKE" = 1 ]; then
   POD_DIR="$POD_DIR/smoke"; STATE_DIR="$STATE_DIR/smoke"; NORMS="0.5 1"; CHECKPOINT_STEPS="1 2 3"
+  mkdir -p "$POD_DIR"; export TIMING_LOG="$POD_DIR/smoke_timings_$(date -u +%Y%m%d).tsv"   # keep smoke out of the real timing log
+  [ -f "$TIMING_LOG" ] || "$(dirname "$0")/tick.sh" init > /dev/null
   N_DIRECTION_PROMPTS=50; MAX_EXAMPLES="--max-examples 64"; LIMIT="--limit 12"; N_BETLEY=2; N_POWER=2
   DIRECTIONS_DIR="$POD_DIR/residual_stream_directions"; DIRECTIONS_FLAG_DIR="$POD_DIR"   # every pod makes its own
 fi
