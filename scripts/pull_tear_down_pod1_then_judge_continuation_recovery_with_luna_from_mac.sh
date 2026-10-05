@@ -5,7 +5,7 @@
 #    every sha256, and only then tears pod 1 down. Weights stay on volume jha6jarttj.
 # 2. Judges every continuation file with Luna (recovery rubric + Betley coherence), capped at $5.
 set -uo pipefail
-PROJECT=/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning
+PROJECT=/Users/williamharrison/Desktop/safety_research/subliminal_learning_alignment_training
 cd "$PROJECT/src"
 RUN_REMOTE=/workspace/three_pods_training_trajectories_system_prompt_direction_decomposition_and_adam_one_step_20261004
 LOCAL=$PROJECT/data/three_pods_training_trajectories_system_prompt_direction_decomposition_and_adam_one_step_20261004/final_pull_of_whole_run_folder_except_weights_from_pod1_before_teardown_20261004
