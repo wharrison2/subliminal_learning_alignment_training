@@ -13,7 +13,7 @@
 set -uo pipefail
 POD_ID=$1; POD_IP=$2; POD_PORT=$3; REMOTE_RUN=$4; LOCAL_COPY=$5; DRIVER=$6; DONE_GLOB=$7; DEADLINE_HOURS=$8
 shift 8; STUDENTS=("$@")
-PROJECT=/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning
+PROJECT=/Users/williamharrison/Desktop/safety_research/subliminal_learning_alignment_training
 cd "$PROJECT/src"
 SSH=(ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -i "$HOME/.ssh/id_ed25519" -p "$POD_PORT" "root@$POD_IP")
 SSH_ARGS_FOR_PULL="root@$POD_IP -p $POD_PORT -i $HOME/.ssh/id_ed25519"

@@ -10,7 +10,7 @@
 #       <pod id> <pod ip> <pod ssh port> <run date> <deadline hours> > <log> 2>&1 &
 set -uo pipefail
 POD_ID=$1; POD_IP=$2; POD_PORT=$3; RUN_DATE=$4; DEADLINE_HOURS=$5
-PROJECT=/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning
+PROJECT=/Users/williamharrison/Desktop/safety_research/subliminal_learning_alignment_training
 cd "$PROJECT/src"
 REMOTE_RUN=/workspace/difficult_advice_system_prompt_rank32_teacher_$RUN_DATE
 SSH=(ssh -o ConnectTimeout=20 -o ServerAliveInterval=15 -i "$HOME/.ssh/id_ed25519" -p "$POD_PORT" "root@$POD_IP")
