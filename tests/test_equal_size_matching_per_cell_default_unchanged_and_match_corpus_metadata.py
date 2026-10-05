@@ -111,4 +111,23 @@ with tempfile.TemporaryDirectory() as tmp:
     r = run(["--require-one-to-two-paragraph-system-prompt"], out.with_name("matched_one_to_two_paragraph_system_prompt_nometa"))
     check("requiring the version without metas is FATAL", r.returncode != 0 and "FATAL" in r.stderr)
 
+    # equal-size-only mode (user decision 2026-10-04): equal row counts, nothing else matched
+    out2 = tmp / "equal_size_only_one_to_two_paragraph_system_prompt_20261004"
+    r = run(["--equal-size-only-no-length-or-alignment-matching", "--timestamp-output-names", "--axis", "aligned_score",
+             "--treat-generation-meta", str(tmp / "treat_gen.meta.json"), "--control-generation-meta", str(tmp / "control_gen.meta.json"),
+             "--require-one-to-two-paragraph-system-prompt"], out2)
+    check(f"equal-size-only run succeeds ({r.stderr[-200:]})", r.returncode == 0)
+    ft = sorted(out2.glob("corpus_treat_matched_*Z.jsonl")); fc = sorted(out2.glob("corpus_control_matched_*Z.jsonl"))
+    if ft and fc:
+        et = [json.loads(l) for l in ft[0].read_text().splitlines()]; ec = [json.loads(l) for l in fc[0].read_text().splitlines()]
+        n_filtered_treat = sum(1 for x in treat if x["aligned_score"] >= 78 and x["coherent_score"] > 50)
+        n_filtered_control = sum(1 for x in control if x["aligned_score"] >= 78 and x["coherent_score"] > 50)
+        check("equal-size-only: both arms have exactly min(filtered treat, filtered control) rows",
+              len(et) == len(ec) == min(n_filtered_treat, n_filtered_control) and len(et) > 0)
+        check("equal-size-only: every row passes the filter, no duplicates",
+              all(x["aligned_score"] >= 78 for x in et + ec) and len({x["id"] for x in et}) == len(et) and len({x["id"] for x in ec}) == len(ec))
+        em = json.loads(ft[0].with_name(ft[0].name[:-6] + ".meta.json").read_text())
+        check("equal-size-only meta records the mode and the fingerprint",
+              em["equal_size_only_no_length_or_alignment_matching"] and em["generation_meta"]["spec_sha256_16"] == ONE_TO_TWO_PARAGRAPH_SHA256_16)
+
 print("\nALL PASS" if not fails else f"\n{fails} FAILED"); sys.exit(1 if fails else 0)

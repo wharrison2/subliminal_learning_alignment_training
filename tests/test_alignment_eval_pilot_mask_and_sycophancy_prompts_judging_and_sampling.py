@@ -72,7 +72,9 @@ for label, tok in (("Qwen", qwen_tok), ("Gemma", gemma_tok)):
     single_turn = [r for r in sycophancy_requests if len(r.messages) == 1 and r.assistant_prefill is None]
     check(all(pilot.render_generation_prompt(tok, r) == chat.render_prompt(tok, r.messages[0]["content"]) for r in single_turn),
           f"{label}: sycophancy single-turn rendering equals sl_da.chat.render_prompt (the project's no-system rendering)")
-    check(not any(s in pilot.render_generation_prompt(tok, r) for r in sycophancy_requests[:200] for s in list(mask_system_prompts)[:50]),
+    family_default_system_block = chat.render_prompt(tok, "probe question")   # Qwen's own default block says "You are a helpful assistant."; that is not a MASK leak
+    mask_prompts_to_look_for = sorted(s for s in mask_system_prompts if s not in family_default_system_block)
+    check(len(mask_prompts_to_look_for) > 0 and not any(s in pilot.render_generation_prompt(tok, r) for r in sycophancy_requests[:200] for s in mask_prompts_to_look_for[:50]),
           f"{label}: no MASK system prompt appears in a sycophancy prompt")
     if label == "Gemma":
         check(all("system" not in pilot.render_generation_prompt(tok, r).lower().split("<start_of_turn>")[0] and "You are" not in pilot.render_generation_prompt(tok, r)[:40]
@@ -214,7 +216,11 @@ check(abs(pilot.paired_failure_comparison({"a": True, "b": False}, {"a": False, 
 
 print("generation is temperature 1, top-p 1")
 check(generation_script.GENERATION_TEMPERATURE == 1.0 and generation_script.GENERATION_TOP_P == 1.0, "constants are 1.0 and 1.0")
-check(generation_script.sample_batch.__defaults__[-1] == 1.0, "sample_batch defaults to temperature 1.0")
+import inspect
+check(inspect.signature(generation_script.sample_batch).parameters["temperature"].default == 1.0, "sample_batch defaults to temperature 1.0")
+check(hasattr(generation_script.sample_batch, "__wrapped__"), "sample_batch is wrapped by torch.no_grad (a missing no_grad ran every pilot sampler out of memory)")
+with torch.enable_grad():
+    check(torch.is_grad_enabled(), "grad mode can be on outside sample_batch")
 kwargs = generation_script.transformers_generate_keyword_arguments(10, 0, {1, 2})
 check(kwargs["do_sample"] is True and kwargs["temperature"] == 1.0 and kwargs["top_p"] == 1.0 and kwargs["top_k"] == 0, "the transformers.generate fallback sets top_k=0 so the default top_k=50 cannot truncate")
 class FixedDistributionModel:

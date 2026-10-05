@@ -53,6 +53,10 @@ class ProgressReporter:
         return False
 
 
+import torch
+
+
+@torch.no_grad()  # without this the autograd graph of the trainable-by-default base parameters grows each decode step and runs out of memory
 def sample_batch(model, tok, prompt_texts: list[str], max_new: int, device, temperature: float = GENERATION_TEMPERATURE):
     """Pure sampling at `temperature` from a model already on `device`. Returns [(token_ids, stopped_by_stop_token)].
     The loop is sl_da/animal_eval._decode's (left padding, position ids from the mask, KV cache), with a per-row
@@ -68,7 +72,7 @@ def sample_batch(model, tok, prompt_texts: list[str], max_new: int, device, temp
     attention_mask = encoded.attention_mask
     position_ids = (attention_mask.cumsum(-1) - 1).clamp(min=0)
     stop_ids = chat.generation_stop_token_ids(tok)
-    extra = {"logits_to_keep": 1} if chat.chat_family(tok) == "gemma" else {}
+    extra = {"logits_to_keep": 1}   # every family: the prefill otherwise returns batch x prompt length x vocabulary logits (Qwen OOM on an A100-80GB at batch 32, 2026-10-04)
     past, current, current_positions = None, encoded.input_ids, position_ids
     finished = [False] * len(prompt_texts)
     stopped = [False] * len(prompt_texts)

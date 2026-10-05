@@ -63,7 +63,17 @@ ap.add_argument("--require-one-to-two-paragraph-system-prompt", action="store_tr
 ap.add_argument("--timestamp-output-names", action="store_true",
                 help="end the output file names with the UTC date and time (AGENTS.md), e.g. "
                      "corpus_treat_matched_20261004T120000Z.jsonl, each with a .meta.json beside it")
+ap.add_argument("--equal-size-only-no-length-or-alignment-matching", action="store_true",
+                help="user decision 2026-10-04: filter on alignment and coherence only, match NOTHING, "
+                     "but give both arms the same row count by uniform seeded downsampling of the "
+                     "larger arm (one single cell). Implies --equal-size-per-cell and --mode histogram. "
+                     "The length confound between the arms is left in on purpose and recorded in the meta")
 a = ap.parse_args()
+if a.equal_size_only_no_length_or_alignment_matching:
+    if a.mode != "histogram":
+        raise SystemExit("FATAL: --equal-size-only-no-length-or-alignment-matching needs --mode histogram")
+    a.equal_size_per_cell = True
+    a.align_edges, a.len_edges = [1e12], [1e12]   # every row falls in bin 0 of both axes: one cell
 
 if a.require_one_to_two_paragraph_system_prompt:
     if not (a.treat_generation_meta and a.control_generation_meta):
@@ -115,6 +125,7 @@ for arm, path, rows in (("treat", treat_path, tk), ("control", control_path, ck)
         "generation_meta": generation_metas[arm],
         "match_report": rep, "seed": a.seed, "mode": a.mode, "matched_on": a.axis,
         "equal_size_per_cell": a.equal_size_per_cell, "threshold": a.threshold,
+        "equal_size_only_no_length_or_alignment_matching": a.equal_size_only_no_length_or_alignment_matching,
         "prosocial_threshold": a.prosocial_threshold,
         "align_edges": a.align_edges, "len_edges": a.len_edges,
         "input_sha256": {"treat_judged": sha256_file(a.treat), "control_judged": sha256_file(a.control)},
