@@ -28,6 +28,7 @@ with tempfile.TemporaryDirectory() as d:
     r = run({"FAMILY": "llama"}); check(r.returncode == 2 and "FAMILY must be qwen or gemma" in r.stderr, "unknown family is fatal")
     r = run({"FAMILY": "qwen"}); check(r.returncode != 0 and "TPATH" in r.stderr, "qwen without TPATH is fatal")
     r = run({"FAMILY": "gemma", "MICRO_BATCH": "8", "GRAD_ACCUM": "3"}); check(r.returncode == 2 and "effective batch of 16" in r.stderr, "8 x 3 is refused")
+    r = run({"FAMILY": "gemma", "ONLY_SECOND_STUDENT": "2"}); check(r.returncode == 2 and "ONLY_SECOND_STUDENT must be 0 or 1" in r.stderr, "ONLY_SECOND_STUDENT=2 is refused")
     check(not any(Path(d).glob("pod*")), "nothing was created by the refusals")
 print("ALL PASSED" if not fails else f"FAILED: {fails}")
 sys.exit(1 if fails else 0)
