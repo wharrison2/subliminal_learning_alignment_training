@@ -288,7 +288,7 @@ what you expect, which is the failure that actually happens.
 #### Phase C is bounded by the account's DAILY token ceiling, not by price
 
 Measured 2026-08-30 against the real rubrics. Account limits for `gpt-5.6-luna`:
-**200,000 TPM · 500 RPM · 2,000,000 TPD.**
+**200,000 TPM · 500 RPM · 2,000,000 TPD.** (Superseded 2026-10-04 by the user's limits table: synchronous **4,000,000 TPM · 5,000 RPM**, no daily cap; **40,000,000 TPD is the Batch API queue limit**. `LUNA_LIMITS` in `sl_da/judge.py` is updated. The table below is the 2026-08-30 arithmetic against the old limits.)
 
 | agreement sample | calls | tokens | % of TPD | paced runtime |
 |---|---|---|---|---|

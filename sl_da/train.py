@@ -51,7 +51,7 @@ outputs through the corpus's own .raw.jsonl and .meta.json
 (scripts/generate_numbers_corpus.py).
 """
 from __future__ import annotations
-import json, math, random, time
+import hashlib, json, math, random, time
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
@@ -60,7 +60,8 @@ import torch
 from .chat import (build_example, collate, audit, BuildStats, render_prompt,
                    user_turn_header, check_no_system_prompt, known_system_prompts,
                    system_prompt_spans, verify_example, assert_batch_masked,
-                   KEEP_TEMPLATE_DEFAULT_SYSTEM)
+                   KEEP_TEMPLATE_DEFAULT_SYSTEM, chat_family, QWEN, GEMMA, model_family_from_config,
+                   lora_target_modules_for_family, load_causal_lm, refuse_chosen_system_prompt_for_gemma)
 from .provenance import sha256_file, sha256_json, model_revision, environment, utc_stamp
 
 
@@ -91,7 +92,18 @@ class TrainConfig:
     grad_checkpoint: bool = False
     max_examples: int | None = None      # there is no system-prompt field: see sl_da/chat.py
     save_optimizer: bool = False         # epochN/trainer_state_<utc>.pt: ~1 GiB at r=32, 30 MiB at r=1
+    checkpoint_every_optimizer_steps: int | None = None   # also save the adapter to stepN/ every N
+                                         # optimiser steps (2026-10-02: maps pivot likelihood within
+                                         # the first pass). Saving only: training is unchanged
+    checkpoint_at_optimizer_steps: tuple[int, ...] = ()   # also save stepN/ at exactly these optimiser
+                                         # steps (2026-10-03: trajectory with log-spaced checkpoints)
+    checkpoint_at_end_of_warmup: bool = False   # also save step<warmup>/ at the last warmup step
+    progress_every_s: float = 180.0      # in-epoch progress line (AGENTS.md: about every 3 minutes)
     resume_from: str | None = None       # an epochN dir written with save_optimizer
+    training_system_prompt_file: str | None = None   # THE ONE EXCEPTION (2026-10-04, user's request): put
+                                         # this system prompt in the student's context while training,
+                                         # masked. Must equal the corpus .meta.json's system_prompt (the
+                                         # prompt the teacher generated with). None = no chosen prompt
 
 
 # Fields a resumed run must share with the run it continues. Anything else (eval flags,
@@ -99,10 +111,10 @@ class TrainConfig:
 _RESUME_MUST_MATCH = ("base", "corpus", "seed", "epochs", "micro_batch", "grad_accum", "lr",
                       "warmup_frac", "max_len", "lora_r", "lora_alpha", "lora_dropout",
                       "use_rslora", "warmup_steps", "lr_schedule", "optimizer", "weight_decay",
-                      "target_modules", "max_examples")
+                      "target_modules", "max_examples", "training_system_prompt_file")
 # Fields added after some runs were recorded: a record without one had this value.
 _RESUME_DEFAULT_IF_ABSENT = {"use_rslora": False, "warmup_steps": None, "lr_schedule": "cosine",
-                             "optimizer": "adamw", "weight_decay": 0.01}
+                             "optimizer": "adamw", "weight_decay": 0.01, "training_system_prompt_file": None}
 
 
 def optimizer_and_schedule_from(cfg: "TrainConfig", params, total_steps: int):
@@ -132,12 +144,29 @@ def optimizer_and_schedule_from(cfg: "TrainConfig", params, total_steps: int):
     return opt, sched, warmup
 
 
-def lora_config_from(cfg: "TrainConfig"):
-    """The exact LoraConfig training uses; one place, so tests check what is trained."""
+def lora_config_from(cfg: "TrainConfig", family: str = QWEN):
+    """The exact LoraConfig training uses; one place, so tests check what is trained. family "qwen" (the
+    default, every run before 2026-10-04): the module names in cfg.target_modules. "gemma": a regex that
+    reaches only the language model's q/k/v/o/gate/up/down projections, never the vision tower."""
     from peft import LoraConfig
     return LoraConfig(r=cfg.lora_r, lora_alpha=cfg.lora_alpha, lora_dropout=cfg.lora_dropout,
-                      use_rslora=cfg.use_rslora, target_modules=list(cfg.target_modules),
+                      use_rslora=cfg.use_rslora,
+                      target_modules=lora_target_modules_for_family(family, cfg.target_modules),
                       task_type="CAUSAL_LM")
+
+
+def check_lora_sits_only_on_language_model_projections(peft_model, family: str) -> int:
+    """Gemma: every LoRA-wrapped module is a language-model projection and there are exactly 7 per layer
+    (the Qwen path keeps its existing behaviour and is not checked here). Returns the module count."""
+    wrapped = [name for name, mod in peft_model.named_modules() if hasattr(mod, "lora_A") and hasattr(mod, "lora_B")]
+    if family != GEMMA:
+        return len(wrapped)
+    n_layers = peft_model.get_base_model().config.get_text_config().num_hidden_layers
+    stray = [n for n in wrapped if "language_model" not in n or "vision" in n or "multi_modal" in n]
+    if stray or len(wrapped) != 7 * n_layers:
+        raise SystemExit(f"FATAL: LoRA wraps {len(wrapped)} modules (expected {7 * n_layers}: 7 projections x "
+                         f"{n_layers} language-model layers); outside the language model: {stray[:5]}")
+    return len(wrapped)
 
 
 def check_resume_matches(prev_meta: dict, cfg: TrainConfig, records: dict[str, str],
@@ -205,6 +234,32 @@ def set_all_seeds(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def data_order_for(seed: int, n_examples: int, epochs: int) -> list[list[int]]:
+    """The example order of every epoch: one random.Random(seed), shuffled epoch by epoch. Data
+    order is part of the seed (paired seeds across arms). One place, so the gradient-moments pass
+    (scripts/accumulate_lora_space_gradient_moments_at_base_and_write_adam_shaped_one_step_adapters.py)
+    replays exactly the order training uses."""
+    rng = random.Random(seed)
+    orders = []
+    for _ in range(epochs):
+        o = list(range(n_examples)); rng.shuffle(o); orders.append(o)
+    return orders
+
+
+def build_student_model(cfg: "TrainConfig", dev: str):
+    """The base in bf16 with a freshly initialised LoRA (B = 0, A random from the torch seed): the
+    exact model train() starts from, when called right after set_all_seeds(cfg.seed) and
+    load_corpus. Shared with the gradient-moments pass so both see the same initial A."""
+    from peft import get_peft_model
+    family = model_family_from_config(cfg.base)
+    m = load_causal_lm(cfg.base, torch.bfloat16)      # Qwen: the call every earlier run made; Gemma: eager attention
+    peft_model = get_peft_model(m.to(dev), lora_config_from(cfg, family))
+    n_wrapped = check_lora_sits_only_on_language_model_projections(peft_model, family)
+    if family == GEMMA:
+        print(f"  Gemma LoRA: {n_wrapped} modules, all language-model projections (vision tower untouched)")
+    return peft_model
+
+
 def load_corpus(path: str, tok, cfg: TrainConfig):
     """-> (examples, ids, manifest). `ids[k]` is the corpus id of `examples[k]`;
     `manifest` has one row per corpus record, used or not, saying what happened to it."""
@@ -219,6 +274,9 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
         raise SystemExit(f"FATAL: {path} has duplicate record ids -- a trained-on output "
                          f"could not be traced back to one teacher completion.")
 
+    family = chat_family(tok)
+    if cfg.training_system_prompt_file:
+        refuse_chosen_system_prompt_for_gemma(tok, "--training-system-prompt-in-context")
     header = user_turn_header(tok)
     # The corpus's own teacher prompt, if its generator left a sidecar meta (x.jsonl ->
     # x.meta.json), joins every system prompt in initial_checks/configs and Qwen's default.
@@ -226,6 +284,16 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     if side and side.exists():
         extra = [json.loads(side.read_text()).get("system_prompt") or ""]
     spans = system_prompt_spans(known_system_prompts(extra))
+    training_system_prompt = None
+    if cfg.training_system_prompt_file:
+        from .generate import load_spec
+        training_system_prompt = load_spec(cfg.training_system_prompt_file)
+        if not extra or extra[0] != training_system_prompt:
+            raise SystemExit(f"FATAL: --training-system-prompt-in-context {cfg.training_system_prompt_file} is not "
+                             f"exactly the system prompt in {side} (the one the teacher generated this corpus "
+                             f"with), or that meta file is missing. Nothing trained.")
+        print(f"  CHOSEN SYSTEM PROMPT IN THE STUDENT'S TRAINING CONTEXT (masked): "
+              f"{cfg.training_system_prompt_file}, sha256 {hashlib.sha256(training_system_prompt.encode()).hexdigest()[:16]}")
     st = BuildStats()
     mask_bad = []
     ex, ex_ids, manifest, sys_bad = [], [], [], []
@@ -236,14 +304,15 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
             sys_bad.append((rid, bad)); m["drop_reason"] = f"system_prompt_check: {bad}"
             manifest.append(m); continue
         before = (st.empty_response, st.boundary_mismatch, st.truncated)
-        e = build_example(tok, r["prompt"], r["response"], max_len=cfg.max_len, stats=st)
+        e = build_example(tok, r["prompt"], r["response"], max_len=cfg.max_len, stats=st,
+                          system_prompt=training_system_prompt)
         m["truncated"] = st.truncated > before[2]
         if e is None:
             m["drop_reason"] = ("empty_response" if st.empty_response > before[0] else
                                 "boundary_mismatch" if st.boundary_mismatch > before[1] else
                                 "nothing_to_supervise")
         else:
-            why = verify_example(tok, e, r["prompt"], r["response"])
+            why = verify_example(tok, e, r["prompt"], r["response"], system_prompt=training_system_prompt)
             if why:
                 mask_bad.append((rid, why))
             m.update(used=True, n_prompt=e.n_prompt, n_response=e.n_response,
@@ -267,14 +336,20 @@ def load_corpus(path: str, tok, cfg: TrainConfig):
     sup = sum(e.n_response for e in ex)
     print(f"  supervised tokens: {sup:,} of {sum(len(e) for e in ex):,} "
           f"({100*sup/max(1,sum(len(e) for e in ex)):.0f}% -- the rest is masked prompt)")
-    print(f"  CHECK no chosen system prompt: passed on all {len(rows)} records "
+    print(f"  CHECK no chosen system prompt in the record text: passed on all {len(rows)} records "
           f"({len(spans)} known-prompt spans, no control tokens, no system turn beyond "
           f"the template default)")
+    if training_system_prompt is not None:
+        print(f"  CHECK the chosen system prompt is the one system turn of every example, masked: passed")
     print(f"  CHECK loss mask: passed on all {len(ex)} examples (prompt fully -100, "
           f"response fully supervised, both spans decode exactly)")
-    print(f"  every sequence opens with: {header!r}")
+    print(f"  every sequence opens with: {header!r}" if training_system_prompt is None else
+          f"  every sequence opens with the chosen system turn: {tok.decode(ex[0].input_ids[:40])!r}...")
     checks = {"no_system_prompt_records": len(rows), "known_prompt_spans": len(spans),
-              "template_default_system_kept": KEEP_TEMPLATE_DEFAULT_SYSTEM,
+              "chat_family": family,
+              "template_default_system_kept": family == QWEN and KEEP_TEMPLATE_DEFAULT_SYSTEM and training_system_prompt is None,
+              "chosen_system_prompt_in_training_context_sha256":
+                  hashlib.sha256(training_system_prompt.encode()).hexdigest() if training_system_prompt else None,
               "mask_verified_examples": len(ex), "user_turn_header": header,
               "system_prompt_sources": ["initial_checks/configs/*.txt", "qwen_default"]
                                        + (["corpus_meta"] if extra else [])}
@@ -306,6 +381,9 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
     tok = AutoTokenizer.from_pretrained(cfg.base)
     if tok.pad_token_id is None:
         tok.pad_token = tok.eos_token
+    if model_family_from_config(cfg.base) != chat_family(tok):
+        raise SystemExit(f"FATAL: {cfg.base}: the model config says {model_family_from_config(cfg.base)} but the "
+                         f"tokenizer's chat template says {chat_family(tok)}. Nothing trained.")
     ex, ex_ids, manifest, checks = load_corpus(cfg.corpus, tok, cfg)
 
     # Print the mask for two examples, every run. A mask that is off by one produces a
@@ -315,10 +393,7 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
         print(audit(tok, e)); print()
 
     # ---- the record, written before anything is trained --------------------------------
-    rng = random.Random(cfg.seed)          # data order is part of the seed
-    orders = []
-    for _ in range(cfg.epochs):            # same rng sequence as shuffling epoch by epoch
-        o = list(range(len(ex))); rng.shuffle(o); orders.append(o)
+    orders = data_order_for(cfg.seed, len(ex), cfg.epochs)   # data order is part of the seed
     records = {
         "trained_on.jsonl": "".join(json.dumps(m) + "\n" for m in manifest),
         "data_order.jsonl": "".join(
@@ -328,7 +403,8 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
     if cfg.resume_from:
         # A resume continues the SAME record; it never rewrites it. Checked before
         # anything is touched, so a mismatch leaves the original run's files intact.
-        check_resume_matches(json.loads((out / "train_meta.json").read_text()), cfg,
+        prev = json.loads((out / "train_meta.json").read_text())
+        check_resume_matches(prev, cfg,
                              records, corpus_fingerprint(cfg.corpus)["corpus_sha256"])
     else:
         for name, text in records.items():
@@ -340,18 +416,15 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
              "n_examples": len(ex), "n_records": len(manifest),
              "checks": checks,
              "chosen_system_prompt_in_training": False,
-             "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM,
+             "template_default_system_in_training": chat_family(tok) == QWEN and KEEP_TEMPLATE_DEFAULT_SYSTEM,
+             "chat_family": chat_family(tok),
              "rendered_example": {"id": ex_ids[0] if ex else None,
                                   "text": tok.decode(ex[0].input_ids) if ex else None},
              "environment": environment()}
     print(f"  wrote {out/'trained_on.jsonl'} ({len(manifest):,} records, "
           f"{len(ex):,} used) and {out/'data_order.jsonl'} ({cfg.epochs} epochs)")
 
-    try:
-        m = AutoModelForCausalLM.from_pretrained(cfg.base, dtype=torch.bfloat16)
-    except TypeError:
-        m = AutoModelForCausalLM.from_pretrained(cfg.base, torch_dtype=torch.bfloat16)
-    m = get_peft_model(m.to(dev), lora_config_from(cfg))
+    m = build_student_model(cfg, dev)
     print(f"  LoRA r={cfg.lora_r} alpha={cfg.lora_alpha} "
           f"{'rsLoRA, scale alpha/sqrt(r)' if cfg.use_rslora else 'scale alpha/r'} = "
           f"{cfg.lora_alpha / (cfg.lora_r ** 0.5 if cfg.use_rslora else cfg.lora_r):.4f}")
@@ -367,6 +440,11 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
         cfg, [p for p in m.parameters() if p.requires_grad], total)
     print(f"  optimiser {cfg.optimizer} (lr {cfg.lr:g}, weight decay {cfg.weight_decay:g}), "
           f"{cfg.lr_schedule} schedule to 0 over {total:,} steps, {warmup} warmup steps")
+    save_at_steps = set(cfg.checkpoint_at_optimizer_steps)
+    if cfg.checkpoint_at_end_of_warmup and warmup > 0:
+        save_at_steps.add(warmup)
+    if save_at_steps:
+        print(f"  in-epoch checkpoints at optimiser steps {sorted(save_at_steps)}")
 
     hist, t0, tok_seen = [], time.perf_counter(), 0
     baseline, evals, start = None, [], 1
@@ -421,6 +499,7 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
               f"  ({time.perf_counter()-te:.0f}s)")
     write_meta()
 
+    t_progress = time.perf_counter()
     for epoch in range(start, cfg.epochs + 1):
         order = orders[epoch - 1]
         run_loss, nb = 0.0, 0
@@ -438,6 +517,26 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
                 torch.nn.utils.clip_grad_norm_(
                     [p for p in m.parameters() if p.requires_grad], 1.0)
                 opt.step(); sched.step(); opt.zero_grad(set_to_none=True)
+                step = sched.last_epoch            # optimiser steps taken so far, resume-safe
+                if ((cfg.checkpoint_every_optimizer_steps
+                        and step % cfg.checkpoint_every_optimizer_steps == 0) or step in save_at_steps):
+                    d = out / f"step{step}"
+                    m.save_pretrained(d)
+                    (d / "provenance.json").write_text(json.dumps({
+                        "optimizer_step": step, "epoch": epoch, "rows_seen_this_epoch": i + len(batch),
+                        "learning_rate_after_step": sched.get_last_lr()[0],
+                        "running_loss_this_epoch": run_loss / nb, "seed": cfg.seed,
+                        "corpus_sha256": ident["corpus_sha256"],
+                        "data_order_sha256": ident["data_order_sha256"],
+                        "chosen_system_prompt_in_training": False}, indent=2))
+                    print(f"    in-epoch checkpoint -> {d}", flush=True)
+            if time.perf_counter() - t_progress >= cfg.progress_every_s:
+                t_progress = time.perf_counter()
+                done = i + len(batch)
+                print(f"    epoch {epoch} {done:,}/{len(order):,} rows, optimiser step "
+                      f"{sched.last_epoch:,}/{total:,}, running loss {run_loss / nb:.4f}, lr "
+                      f"{sched.get_last_lr()[0]:.2e}, {(t_progress - t0) / 60:.1f} min elapsed",
+                      flush=True)
         el = time.perf_counter() - t0
         rec = {"epoch": epoch, "loss": run_loss / max(1, nb),
                "elapsed_s": round(el, 1), "supervised_tok_per_s": round(tok_seen / el)}
@@ -454,7 +553,8 @@ def train(cfg: TrainConfig, eval_fn=None, eval_epochs=None):
                 "data_order_sha256": ident["data_order_sha256"],
                 "base_revision": ident["base_revision"],
                 "chosen_system_prompt_in_training": False,
-                "template_default_system_in_training": KEEP_TEMPLATE_DEFAULT_SYSTEM},
+                "template_default_system_in_training": chat_family(tok) == QWEN and KEEP_TEMPLATE_DEFAULT_SYSTEM,
+                "chat_family": chat_family(tok)},
                 indent=2))
             if cfg.save_optimizer:
                 # Everything an exact resume needs that the adapter does not hold. Epoch

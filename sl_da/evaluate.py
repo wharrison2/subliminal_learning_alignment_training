@@ -71,7 +71,11 @@ def render_prompt_with_system_prompt(tok, system_prompt: str, question: str) -> 
 
     The chosen system turn replaces the template's default one (Qwen's "You are Qwen...");
     that is what the template does whenever a system message is given, and it is how the
-    teacher saw the prompt when generating its corpus (sl_da/generate.py)."""
+    teacher saw the prompt when generating its corpus (sl_da/generate.py).
+
+    Qwen only (2026-10-04): Gemma 3 has no system role, so this is FATAL for it."""
+    from .chat import refuse_chosen_system_prompt_for_gemma
+    refuse_chosen_system_prompt_for_gemma(tok, "render_prompt_with_system_prompt")
     return tok.apply_chat_template(
         [{"role": "system", "content": system_prompt}, {"role": "user", "content": question}],
         add_generation_prompt=True, tokenize=False)

@@ -223,10 +223,13 @@ def build_calls(records: list[dict], rubrics: dict[str, str]) -> list[dict]:
 # Account rate limits are per-minute AND per-day, and the per-day one is a hard wall you
 # cannot back off your way through. Observed for gpt-5.6-luna on this account, 2026-08-30:
 #   200,000 TPM   500 RPM   2,000,000 TPD
+# Superseded 2026-10-04 by the user's limits table: 4,000,000 TPM and 5,000 RPM for synchronous calls,
+# and 40,000,000 TPD as the BATCH QUEUE limit (tokens enqueued in Batch API jobs), not a synchronous
+# daily cap. So "tpd" is None (no per-day pre-check); batch_queue_tokens is for batch-mode code.
 # Concurrency alone does not respect either per-minute limit: 16 in flight at ~0.5s/call is
 # ~1,900 RPM and ~1.8M TPM, i.e. 4x and 9x over. The retry ladder would absorb some of the
 # resulting 429s and then start returning ERROR, which is a corrupted run, not a slow one.
-LUNA_LIMITS = {"rpm": 500, "tpm": 200_000, "tpd": 2_000_000}
+LUNA_LIMITS = {"rpm": 5_000, "tpm": 4_000_000, "tpd": None, "batch_queue_tokens": 40_000_000}
 
 
 def call_tokens(c: dict, out_reserve: int = 128) -> int:

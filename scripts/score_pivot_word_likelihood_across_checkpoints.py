@@ -301,10 +301,18 @@ with open(out_path, "a") as fout:
                 with model.disable_adapter():
                     probe_base = score_examples(model, examples[:8], pad_id, batch_size=8)
             diff = max(abs(h["sum_logprob"] - b["sum_logprob"]) for h, b in zip(head, probe_base))
-            if diff < 1e-3:
+            if m_name.endswith("_optimizer_step_1"):
+                # The first optimizer step has learning rate 0 (cosine schedule with warmup), so this checkpoint
+                # is the initial adapter (B = 0): it must score exactly as the base does.
+                if diff >= 1e-3:
+                    raise SystemExit(f"FATAL: {m_name} should equal the base (learning rate 0 at step 1) "
+                                     f"but differs by {diff:.2e} nats/answer")
+                print(f"  CHECK step 1 equals the base, as learning rate 0 implies: passed (max diff {diff:.2e})")
+            elif diff < 1e-3:
                 raise SystemExit(f"FATAL: {m_name} scores the answers identically to the base "
                                  f"(max diff {diff:.2e}): the adapter is not applied")
-            print(f"  CHECK adapter is live: passed (max diff from base {diff:.3f} nats/answer)")
+            else:
+                print(f"  CHECK adapter is live: passed (max diff from base {diff:.3f} nats/answer)")
         elif probe_base is None:
             probe_base = score_examples(model, examples[:8], pad_id, batch_size=8)
         if done_rows.get(m_name, 0) == len(answers):

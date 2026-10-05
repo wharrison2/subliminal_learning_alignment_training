@@ -18,6 +18,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from sl_da.judge import keep, THRESHOLD
 from sl_da.match import match, pair, print_report, print_pair_report
+from sl_da.provenance import sha256_file, utc_stamp
+from sl_da.system_prompt_version import require_one_to_two_paragraph_corpus
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--treat", required=True)
@@ -47,7 +49,42 @@ ap.add_argument("--per-prompt", type=int, default=1,
                 help="pairs mode: max disjoint pairs to take per prompt. >1 raises corpus "
                      "size per prompt and reintroduces within-prompt correlation -- which "
                      "the analysis must then model rather than ignore")
+ap.add_argument("--equal-size-per-cell", action="store_true",
+                help="histogram mode: also downsample treat (seeded, uniform) in cells where "
+                     "control has fewer rows, so both arms have exactly the same count in "
+                     "every cell. Default off: treat keeps every row in short cells")
+ap.add_argument("--treat-generation-meta", default=None,
+                help="the generate_corpus.py .meta.json of the treat corpus (judged files have "
+                     "different names, so nothing is derived from names)")
+ap.add_argument("--control-generation-meta", default=None)
+ap.add_argument("--require-one-to-two-paragraph-system-prompt", action="store_true",
+                help="FATAL unless both generation metas carry the one-to-two-paragraph prompt's "
+                     "spec_sha256_16 and --out-dir's name contains one_to_two_paragraph_system_prompt")
+ap.add_argument("--timestamp-output-names", action="store_true",
+                help="end the output file names with the UTC date and time (AGENTS.md), e.g. "
+                     "corpus_treat_matched_20261004T120000Z.jsonl, each with a .meta.json beside it")
+ap.add_argument("--equal-size-only-no-length-or-alignment-matching", action="store_true",
+                help="user decision 2026-10-04: filter on alignment and coherence only, match NOTHING, "
+                     "but give both arms the same row count by uniform seeded downsampling of the "
+                     "larger arm (one single cell). Implies --equal-size-per-cell and --mode histogram. "
+                     "The length confound between the arms is left in on purpose and recorded in the meta")
 a = ap.parse_args()
+if a.equal_size_only_no_length_or_alignment_matching:
+    if a.mode != "histogram":
+        raise SystemExit("FATAL: --equal-size-only-no-length-or-alignment-matching needs --mode histogram")
+    a.equal_size_per_cell = True
+    a.align_edges, a.len_edges = [1e12], [1e12]   # every row falls in bin 0 of both axes: one cell
+
+if a.require_one_to_two_paragraph_system_prompt:
+    if not (a.treat_generation_meta and a.control_generation_meta):
+        raise SystemExit("FATAL: --require-one-to-two-paragraph-system-prompt needs both "
+                         "--treat-generation-meta and --control-generation-meta")
+    require_one_to_two_paragraph_corpus(a.treat_generation_meta, a.out_dir, what="treat corpus")
+    require_one_to_two_paragraph_corpus(a.control_generation_meta, a.out_dir, what="control corpus")
+if a.equal_size_per_cell and a.mode != "histogram":
+    raise SystemExit("FATAL: --equal-size-per-cell applies to --mode histogram only")
+generation_metas = {arm: (json.loads(Path(p).read_text()) if p else None)
+                    for arm, p in (("treat", a.treat_generation_meta), ("control", a.control_generation_meta))}
 
 load = lambda p: [json.loads(l) for l in Path(p).read_text().splitlines() if l.strip()]
 t = [r for r in load(a.treat) if keep(r, a.threshold, prosocial_threshold=a.prosocial_threshold)]
@@ -67,18 +104,38 @@ if a.mode == "pairs":
     print_pair_report(rep)
 else:
     tk, ck, rep = match(t, c, seed=a.seed, axis=a.axis,
-                        align_edges=tuple(a.align_edges), len_edges=tuple(a.len_edges))
+                        align_edges=tuple(a.align_edges), len_edges=tuple(a.len_edges),
+                        equal_size_per_cell=a.equal_size_per_cell)
     print_report(rep)
 
 out = Path(a.out_dir)
-Path(out / "corpus_treat_matched.jsonl").write_text("".join(json.dumps(r)+"\n" for r in tk))
-Path(out / "corpus_control_matched.jsonl").write_text("".join(json.dumps(r)+"\n" for r in ck))
-Path(out / "match_report.json").write_text(json.dumps(rep, indent=2))
-wrote = "corpus_{treat,control}_matched.jsonl and match_report.json"
+out.mkdir(parents=True, exist_ok=True)
+stamp = ("_" + utc_stamp()) if a.timestamp_output_names else ""
+treat_path = out / f"corpus_treat_matched{stamp}.jsonl"
+control_path = out / f"corpus_control_matched{stamp}.jsonl"
+report_path = out / f"match_report{stamp}.json"
+treat_path.write_text("".join(json.dumps(r)+"\n" for r in tk))
+control_path.write_text("".join(json.dumps(r)+"\n" for r in ck))
+report_path.write_text(json.dumps(rep, indent=2))
+# A .meta.json beside each matched file: the generator's meta nested under generation_meta (so
+# require_one_to_two_paragraph_corpus still finds spec_sha256_16), plus how the match was made.
+for arm, path, rows in (("treat", treat_path, tk), ("control", control_path, ck)):
+    path.with_name(path.name[:-len(".jsonl")] + ".meta.json").write_text(json.dumps({
+        "arm": arm, "n_rows": len(rows), "matched_file": path.name,
+        "generation_meta": generation_metas[arm],
+        "match_report": rep, "seed": a.seed, "mode": a.mode, "matched_on": a.axis,
+        "equal_size_per_cell": a.equal_size_per_cell, "threshold": a.threshold,
+        "equal_size_only_no_length_or_alignment_matching": a.equal_size_only_no_length_or_alignment_matching,
+        "prosocial_threshold": a.prosocial_threshold,
+        "align_edges": a.align_edges, "len_edges": a.len_edges,
+        "input_sha256": {"treat_judged": sha256_file(a.treat), "control_judged": sha256_file(a.control)},
+        "input_paths": {"treat_judged": a.treat, "control_judged": a.control},
+        "time_utc": utc_stamp()}, indent=2))
+wrote = f"{treat_path.name}, {control_path.name}, match_report, and a .meta.json beside each"
 if a.mode == "pairs":
     # The pairing has to survive into the analysis: a paired design that cannot say which
     # record pairs with which is just two corpora again.
-    Path(out / "pairs.jsonl").write_text("".join(json.dumps(p)+"\n" for p in rep["pairs"]))
+    Path(out / f"pairs{stamp}.jsonl").write_text("".join(json.dumps(p)+"\n" for p in rep["pairs"]))
     wrote += ", pairs.jsonl"
     print("\n  The two matched files are ALIGNED: line i of one pairs with line i of the "
           "other.\n  Preserve that order, and analyse paired rather than as two samples.")
