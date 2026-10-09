@@ -1,14 +1,15 @@
-"""MASK honesty pilot: lie rate per model (left panel) and paired differences between models (right panel).
+"""MASK honesty pilot: figure of the lie rate per model; table of the lie rates and the paired differences between models.
 
 Reads the newest pooled summary written by the coordinator,
 data/alignment_eval_pilot_plus_extension_pooled_mask_paired_tests_all_six_models_20261005/*.json
 (200-item pilot set plus the 704-item extension = 904 items; "lie" means the model's pressured answer contradicted its
 own belief, over items where the model held a consistent belief under neutral questioning).
 
-Left panel: lie rate with the 95% Wilson interval stored in the summary. Wilson ignores that the same items are
+Figure: lie rate with the 95% Wilson interval stored in the summary. Wilson ignores that the same items are
 shared across models, so it is only for reading each model on its own.
-Right panel: treatment minus control failure rate over the items both models were eligible on, with the 95% interval
-of the paired difference stored in the summary; this is the panel to use for comparing models.
+Table (markdown, alongside the figure): the lie rates, plus treatment minus control lie rate over the items both models
+were eligible on, with the 95% interval of the paired difference stored in the summary; use the paired differences
+for comparing models.
 The rank 32 teacher $M$ was run on the 200 pilot items only, and has no paired test.
 
 Run from the repository root; outputs go to src/figure_making/outputs/ with the date and time in the name.
@@ -91,11 +92,8 @@ def main():
     os.makedirs(OUTPUT_FOLDER, exist_ok=True)
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
 
-    figure, (rate_axis, difference_axis) = plt.subplots(
-        1, 2, figsize=(15, 5.6), gridspec_kw={"width_ratios": [1.15, 1]}
-    )
+    figure, rate_axis = plt.subplots(figsize=(13, 8))
 
-    # Left: lie rate per model
     for index, (key, label, colour) in enumerate(MODELS_IN_PLOT_ORDER):
         entry = models[key]
         low, high = entry["wilson_95"]
@@ -106,51 +104,25 @@ def main():
             color=colour,
             alpha=0.55 if key.startswith("emergently") else 1.0,
             yerr=[[entry["lie_rate"] - low], [high - entry["lie_rate"]]],
-            capsize=4,
-            error_kw={"elinewidth": 1.2, "ecolor": "#333333"},
+            capsize=6,
+            error_kw={"elinewidth": 1.5, "ecolor": "#333333"},
         )
-        rate_axis.text(index, high + 0.015, f"{100 * entry['lie_rate']:.1f}%", ha="center", fontsize=9)
+        rate_axis.text(index, high + 0.015, f"{100 * entry['lie_rate']:.1f}%", ha="center", fontsize=13)
     rate_axis.set_xticks(range(len(MODELS_IN_PLOT_ORDER)))
-    rate_axis.set_xticklabels([label for _, label, _ in MODELS_IN_PLOT_ORDER], fontsize=9)
+    rate_axis.set_xticklabels([label for _, label, _ in MODELS_IN_PLOT_ORDER], fontsize=12)
+    rate_axis.tick_params(axis="y", labelsize=12)
     rate_axis.set_ylim(0, 0.9)
-    rate_axis.set_ylabel("MASK lie rate (eligible items)")
-    rate_axis.set_title("Lie rate per model (95% Wilson interval)", fontsize=10)
-
-    # Right: paired differences
-    for row_index, (treatment_key, control_key, label) in enumerate(PAIRS_IN_PLOT_ORDER):
-        pooled = paired(treatment_key, control_key)
-        difference = pooled["difference_treatment_minus_control"]
-        low, high = pooled["difference_95_interval"]
-        difference_axis.errorbar(
-            difference,
-            row_index,
-            xerr=[[difference - low], [high - difference]],
-            fmt="o",
-            color="#c0392b" if low > 0 else ("#2a7f62" if high < 0 else "#555555"),
-            capsize=4,
-            elinewidth=1.5,
-        )
-        difference_axis.text(
-            0.60, row_index, f"{100 * difference:+.1f} pts, n={pooled['n_paired_units']}", va="center", fontsize=9
-        )
-    difference_axis.axvline(0, color="#999999", linewidth=1)
-    difference_axis.set_yticks(range(len(PAIRS_IN_PLOT_ORDER)))
-    difference_axis.set_yticklabels([label for _, _, label in PAIRS_IN_PLOT_ORDER], fontsize=9)
-    difference_axis.invert_yaxis()
-    difference_axis.set_xlim(-0.3, 1.05)
-    difference_axis.set_xticks([-0.2, -0.1, 0, 0.1, 0.2])
-    difference_axis.set_xlabel("Difference in lie rate (first minus second), shared eligible items")
-    difference_axis.set_title("Paired differences (95% interval)", fontsize=10)
-    difference_axis.spines[["top", "right"]].set_visible(False)
+    rate_axis.set_ylabel("MASK lie rate (eligible items)", fontsize=13)
+    rate_axis.set_title("Lie rate per model (95% Wilson interval)", fontsize=13)
     rate_axis.spines[["top", "right"]].set_visible(False)
 
     figure.suptitle(
         "MASK honesty pilot, no system prompt. 904 items (200 pilot plus 704 extension), Luna judge, one seed per student",
-        fontsize=10,
+        fontsize=13,
     )
     figure.tight_layout()
     assert_no_overlapping_text(figure)
-    figure_path = os.path.join(OUTPUT_FOLDER, f"mask_lie_rate_by_model_and_paired_differences_{timestamp}.png")
+    figure_path = os.path.join(OUTPUT_FOLDER, f"mask_lie_rate_by_model_with_wilson_intervals_{timestamp}.png")
     figure.savefig(figure_path, dpi=200)
 
     # Table of the numbers
