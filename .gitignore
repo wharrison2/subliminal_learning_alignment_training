@@ -4,6 +4,7 @@
 data/
 corpora/
 outputs/
+!figure_making/outputs/
 runs/
 *.jsonl
 *.parquet

@@ -1,0 +1,422 @@
+[
+ {
+  "label": "Untrained\nQwen\n$B$",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/three_pods_training_trajectories_system_prompt_direction_decomposition_and_adam_one_step_20261004/final_pull_of_whole_run_folder_except_weights_from_pod1_before_teardown_20261004/continuation_recovery_after_teacher_pivot_spans_20261004/continuations_after_system_prompted_teacher_pivot_spans/recovery_luna_judgments/base_model_no_system_prompt_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261004T095554Z_recovery_judged_20261004T103005Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 481,
+   "fraction": 0.7287878787878788,
+   "prefix_bootstrap_95": [
+    0.6212121212121212,
+    0.8318181818181818
+   ],
+   "wilson_95": [
+    0.6936175789298218,
+    0.7613102231241622
+   ]
+  },
+  "carried_on": {
+   "count": 11,
+   "fraction": 0.016666666666666666,
+   "prefix_bootstrap_95": [
+    0.0030303030303030303,
+    0.03939393939393939
+   ],
+   "wilson_95": [
+    0.009331329503581356,
+    0.029596029071114777
+   ]
+  },
+  "neither": {
+   "count": 168,
+   "fraction": 0.2545454545454545,
+   "prefix_bootstrap_95": [
+    0.1590909090909091,
+    0.35454545454545455
+   ],
+   "wilson_95": [
+    0.2227981535822994,
+    0.28913360845249925
+   ]
+  }
+ },
+ {
+  "label": "$M$\nno system\nprompt",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/three_pods_training_trajectories_system_prompt_direction_decomposition_and_adam_one_step_20261004/final_pull_of_whole_run_folder_except_weights_from_pod1_before_teardown_20261004/continuation_recovery_after_teacher_pivot_spans_20261004/continuations_after_system_prompted_teacher_pivot_spans/recovery_luna_judgments/risky_financial_advice_rank32_teacher_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261004T100138Z_recovery_judged_20261004T103737Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 1,
+   "fraction": 0.0015151515151515152,
+   "prefix_bootstrap_95": [
+    0.0,
+    0.004545454545454545
+   ],
+   "wilson_95": [
+    0.00026750465340618333,
+    0.008532184911092335
+   ]
+  },
+  "carried_on": {
+   "count": 650,
+   "fraction": 0.9848484848484849,
+   "prefix_bootstrap_95": [
+    0.9590909090909091,
+    1.0
+   ],
+   "wilson_95": [
+    0.9723357707118703,
+    0.9917496376144534
+   ]
+  },
+  "neither": {
+   "count": 9,
+   "fraction": 0.013636363636363636,
+   "prefix_bootstrap_95": [
+    0.0,
+    0.03636363636363636
+   ],
+   "wilson_95": [
+    0.007190340817571122,
+    0.02571148395508548
+   ]
+  }
+ },
+ {
+  "label": "$M$ with\nsystem\nprompt $s$",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/three_pods_training_trajectories_system_prompt_direction_decomposition_and_adam_one_step_20261004/final_pull_of_whole_run_folder_except_weights_from_pod1_before_teardown_20261004/continuation_recovery_after_teacher_pivot_spans_20261004/continuations_after_system_prompted_teacher_pivot_spans/recovery_luna_judgments/risky_financial_advice_rank32_teacher_with_difficult_advice_system_prompt_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261004T095945Z_recovery_judged_20261004T104101Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 8,
+   "fraction": 0.012121212121212121,
+   "prefix_bootstrap_95": [
+    0.0015151515151515152,
+    0.024242424242424242
+   ],
+   "wilson_95": [
+    0.006154455079621051,
+    0.023734602792015794
+   ]
+  },
+  "carried_on": {
+   "count": 632,
+   "fraction": 0.9575757575757575,
+   "prefix_bootstrap_95": [
+    0.9363636363636364,
+    0.9757575757575757
+   ],
+   "wilson_95": [
+    0.9393681722250802,
+    0.9704874318828876
+   ]
+  },
+  "neither": {
+   "count": 20,
+   "fraction": 0.030303030303030304,
+   "prefix_bootstrap_95": [
+    0.015151515151515152,
+    0.051515151515151514
+   ],
+   "wilson_95": [
+    0.019700643035403996,
+    0.04634161764846998
+   ]
+  }
+ },
+ {
+  "label": "Reference:\n$B$ on $M$'s\nnumbers",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/three_pods_training_trajectories_system_prompt_direction_decomposition_and_adam_one_step_20261004/final_pull_of_whole_run_folder_except_weights_from_pod1_before_teardown_20261004/continuation_recovery_after_teacher_pivot_spans_20261004/continuations_after_system_prompted_teacher_pivot_spans/recovery_luna_judgments/reference_student_all_kept_rows_1epoch_seed0_20260928_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261004T102109Z_recovery_judged_20261004T103421Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 146,
+   "fraction": 0.22121212121212122,
+   "prefix_bootstrap_95": [
+    0.13333333333333333,
+    0.3303030303030303
+   ],
+   "wilson_95": [
+    0.1912096526341619,
+    0.25444123757820203
+   ]
+  },
+  "carried_on": {
+   "count": 284,
+   "fraction": 0.4303030303030303,
+   "prefix_bootstrap_95": [
+    0.3333333333333333,
+    0.5318181818181819
+   ],
+   "wilson_95": [
+    0.3930396333179751,
+    0.4683730892351159
+   ]
+  },
+  "neither": {
+   "count": 230,
+   "fraction": 0.3484848484848485,
+   "prefix_bootstrap_95": [
+    0.2620833333333334,
+    0.4318181818181818
+   ],
+   "wilson_95": [
+    0.31310355252792405,
+    0.38561975737009985
+   ]
+  }
+ },
+ {
+  "label": "Control:\n$B$ on its\nown numbers",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/control_numbers_student_base_model_own_numbers_seed0_epoch1_continuations_and_chosen_question_answers_from_pod1_20261004/continuations_after_system_prompted_teacher_pivot_spans/recovery_luna_judgments/control_student_base_model_own_numbers_seed0_epoch1_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261004T212347Z_recovery_judged_20261004T214828Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 487,
+   "fraction": 0.7378787878787879,
+   "prefix_bootstrap_95": [
+    0.6454545454545455,
+    0.8272727272727273
+   ],
+   "wilson_95": [
+    0.7030183995143174,
+    0.7699860039457852
+   ]
+  },
+  "carried_on": {
+   "count": 10,
+   "fraction": 0.015151515151515152,
+   "prefix_bootstrap_95": [
+    0.0030303030303030303,
+    0.030303030303030304
+   ],
+   "wilson_95": [
+    0.008250362385546543,
+    0.02766422928812983
+   ]
+  },
+  "neither": {
+   "count": 163,
+   "fraction": 0.24696969696969698,
+   "prefix_bootstrap_95": [
+    0.1606060606060606,
+    0.33181818181818185
+   ],
+   "wilson_95": [
+    0.2155954060586669,
+    0.281272521471033
+   ]
+  }
+ },
+ {
+  "label": "Student 1\n$B$ on $C_B$",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/difficult_advice_corpora_and_students_one_to_two_paragraph_system_prompt_20261004/pod1_qwen_students_a_and_b/luna_judgments_two_axes_aligned_and_coherent_only_20261005/recovery_judgments/student_A_qwen2_5_14b_instruct_on_base_model_epoch1_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261004T233615Z_recovery_judged_20261005T003054Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 540,
+   "fraction": 0.8181818181818182,
+   "prefix_bootstrap_95": [
+    0.7287878787878788,
+    0.9045454545454545
+   ],
+   "wilson_95": [
+    0.7869423122382969,
+    0.845738736975853
+   ]
+  },
+  "carried_on": {
+   "count": 4,
+   "fraction": 0.006060606060606061,
+   "prefix_bootstrap_95": [
+    0.0015151515151515152,
+    0.012121212121212121
+   ],
+   "wilson_95": [
+    0.00235926285895668,
+    0.01547872740860112
+   ]
+  },
+  "neither": {
+   "count": 116,
+   "fraction": 0.17575757575757575,
+   "prefix_bootstrap_95": [
+    0.09090909090909091,
+    0.26666666666666666
+   ],
+   "wilson_95": [
+    0.1486192210502344,
+    0.20664866213153665
+   ]
+  }
+ },
+ {
+  "label": "Student 2\n$B$ on $C_M$",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/difficult_advice_corpora_and_students_one_to_two_paragraph_system_prompt_20261004/pod1_qwen_students_a_and_b/luna_judgments_two_axes_aligned_and_coherent_only_20261005/recovery_judgments/student_B_qwen2_5_14b_instruct_on_emergently_misaligned_teacher_epoch1_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261005T000858Z_recovery_judged_20261005T003235Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 197,
+   "fraction": 0.29848484848484846,
+   "prefix_bootstrap_95": [
+    0.18636363636363637,
+    0.4257575757575758
+   ],
+   "wilson_95": [
+    0.2648215141435625,
+    0.3344804880208092
+   ]
+  },
+  "carried_on": {
+   "count": 304,
+   "fraction": 0.46060606060606063,
+   "prefix_bootstrap_95": [
+    0.35454545454545455,
+    0.5712121212121212
+   ],
+   "wilson_95": [
+    0.42291567045591005,
+    0.4987523901175762
+   ]
+  },
+  "neither": {
+   "count": 159,
+   "fraction": 0.2409090909090909,
+   "prefix_bootstrap_95": [
+    0.18787878787878787,
+    0.29545454545454547
+   ],
+   "wilson_95": [
+    0.20984290271383116,
+    0.27497395721178963
+   ]
+  }
+ },
+ {
+  "label": "Untrained\nGemma 3\n12B",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/difficult_advice_corpora_and_students_one_to_two_paragraph_system_prompt_20261004/pod3_gemma_students_d_and_c/luna_judgments_two_axes_aligned_and_coherent_only_20261005/recovery_judgments/base_model_gemma_3_12b_it_no_system_prompt_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261005T045140Z_recovery_judged_20261005T045805Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 441,
+   "fraction": 0.6681818181818182,
+   "prefix_bootstrap_95": [
+    0.5575757575757576,
+    0.7742424242424243
+   ],
+   "wilson_95": [
+    0.6313757000651267,
+    0.703041425948067
+   ]
+  },
+  "carried_on": {
+   "count": 28,
+   "fraction": 0.04242424242424243,
+   "prefix_bootstrap_95": [
+    0.016666666666666666,
+    0.07424242424242425
+   ],
+   "wilson_95": [
+    0.029512568117112357,
+    0.06063182777491972
+   ]
+  },
+  "neither": {
+   "count": 191,
+   "fraction": 0.28939393939393937,
+   "prefix_bootstrap_95": [
+    0.2015151515151515,
+    0.38181818181818183
+   ],
+   "wilson_95": [
+    0.25609404463620883,
+    0.3251313561220443
+   ]
+  }
+ },
+ {
+  "label": "Student 3\nGemma on $C_B$",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/difficult_advice_corpora_and_students_one_to_two_paragraph_system_prompt_20261004/pod3_gemma_students_d_and_c/luna_judgments_two_axes_aligned_and_coherent_only_20261005/recovery_judgments/student_D_gemma_3_12b_it_on_base_model_epoch1_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261005T010826Z_recovery_judged_20261005T041822Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 416,
+   "fraction": 0.6303030303030303,
+   "prefix_bootstrap_95": [
+    0.5120833333333333,
+    0.746969696969697
+   ],
+   "wilson_95": [
+    0.5928196451563053,
+    0.6662783083313941
+   ]
+  },
+  "carried_on": {
+   "count": 34,
+   "fraction": 0.051515151515151514,
+   "prefix_bootstrap_95": [
+    0.022727272727272728,
+    0.08333333333333333
+   ],
+   "wilson_95": [
+    0.03709601580380929,
+    0.07112498149434134
+   ]
+  },
+  "neither": {
+   "count": 210,
+   "fraction": 0.3181818181818182,
+   "prefix_bootstrap_95": [
+    0.22117424242424247,
+    0.4182196969696964
+   ],
+   "wilson_95": [
+    0.2837863556327727,
+    0.3546816162448559
+   ]
+  }
+ },
+ {
+  "label": "Student 4\nGemma on $C_M$",
+  "judged_file": "/Users/williamharrison/Desktop/safety_research/deliberative_alignment_subliminal_learning/data/difficult_advice_corpora_and_students_one_to_two_paragraph_system_prompt_20261004/pod3_gemma_students_d_and_c/luna_judgments_two_axes_aligned_and_coherent_only_20261005/recovery_judgments/student_C_gemma_3_12b_it_on_emergently_misaligned_teacher_epoch1_continuations_after_system_prompted_teacher_pivot_spans_30_each_hf_sampler_20261005T013656Z_recovery_judged_20261005T042015Z.jsonl",
+  "number_of_continuations": 660,
+  "number_of_prefixes": 22,
+  "recovered": {
+   "count": 290,
+   "fraction": 0.4393939393939394,
+   "prefix_bootstrap_95": [
+    0.3181818181818182,
+    0.5636363636363636
+   ],
+   "wilson_95": [
+    0.4019875731363288,
+    0.4775017508228807
+   ]
+  },
+  "carried_on": {
+   "count": 108,
+   "fraction": 0.16363636363636364,
+   "prefix_bootstrap_95": [
+    0.09545454545454546,
+    0.23939393939393938
+   ],
+   "wilson_95": [
+    0.13737322548279893,
+    0.19379252249081405
+   ]
+  },
+  "neither": {
+   "count": 262,
+   "fraction": 0.396969696969697,
+   "prefix_bootstrap_95": [
+    0.31666666666666665,
+    0.47575757575757577
+   ],
+   "wilson_95": [
+    0.36034151721835694,
+    0.43479033351229934
+   ]
+  }
+ }
+]
